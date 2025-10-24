@@ -1,0 +1,2 @@
+Run the FrontEnd - D:\WorkSpace\ZerodhaKite\.venv\WorkSpace\frontend>npm install
+Run the BackEnd - D:\WorkSpace\ZerodhaKite\.venv\WorkSpace\backend>uvicorn main:app --host 0.0.0.0 --port 8000
