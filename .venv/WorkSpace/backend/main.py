@@ -3,6 +3,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect
 import logging
+from pydantic import BaseModel
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class Strategy(BaseModel):
+    strategy: str
+    candle: str
+    index: str
+    startTime: str
+    targetProfit: int
+    stopLoss: int
+    quantity: int
+
+trade_active = False
 
 @app.get("/")
 def read_root():
@@ -106,3 +118,34 @@ def get_user_profile():
     except Exception as e:
         logging.error(f"Error fetching profile: {e}")
         return {"status": "error", "message": "Could not fetch profile"}
+
+@app.post("/api/strategy/start")
+def start_strategy(strategy: Strategy):
+    global trade_active
+    logging.info(f"Starting strategy: {strategy.dict()}")
+    trade_active = True
+    return {"status": "success"}
+
+@app.post("/api/strategy/stop")
+def stop_strategy():
+    global trade_active
+    logging.info("Stopping strategy")
+    trade_active = False
+    return {"status": "success"}
+
+@app.post("/api/trade/squareoff")
+def square_off():
+    global trade_active
+    logging.info("Squaring off trade")
+    trade_active = False
+    return {"status": "success"}
+
+@app.get("/api/trade/pnl")
+def get_pnl():
+    global trade_active
+    if trade_active:
+        # In a real application, you would calculate the actual P&L
+        import random
+        pnl = random.randint(-1000, 1000)
+        return {"pnl": pnl}
+    return {"pnl": 0}
