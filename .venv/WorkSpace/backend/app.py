@@ -92,7 +92,8 @@ def signup():
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
 
         if user:
-            return "Email already exists!"
+            flash('Email already exists!', 'error')
+            return redirect('/signup')
 
         otp = secrets.token_hex(3).upper()
         otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
