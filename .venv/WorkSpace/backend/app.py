@@ -116,11 +116,16 @@ def verify_otp():
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
 
         if user and user['otp'] == otp_entered and user['otp_expiry'] > datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'):
-            conn.execute('UPDATE users SET email_verified = 1 WHERE email = ?', (email,))
-            conn.commit()
-            conn.close()
-            session['user_id'] = user['id']
-            return redirect('/dashboard')
+            if not user['email_verified']:
+                conn.execute('UPDATE users SET email_verified = 1 WHERE email = ?', (email,))
+                conn.commit()
+                conn.close()
+                flash('Registration successful! Please log in.', 'success')
+                return redirect('/login')
+            else:
+                conn.close()
+                session['user_id'] = user['id']
+                return redirect('/dashboard')
         else:
             return "Invalid OTP or OTP expired!"
 
