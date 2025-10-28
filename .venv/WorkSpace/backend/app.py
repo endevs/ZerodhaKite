@@ -128,11 +128,17 @@ def verify_otp():
             else:
                 conn.close()
                 session['user_id'] = user['id']
-                return redirect('/dashboard')
+                return redirect('/welcome')
         else:
             return "Invalid OTP or OTP expired!"
 
     return render_template('verify_otp.html', email=email)
+
+@app.route('/welcome')
+def welcome():
+    if 'user_id' not in session:
+        return redirect('/')
+    return render_template('welcome.html')
 
 @app.route('/zerodha_setup', methods=['GET', 'POST'])
 def zerodha_setup():
@@ -191,8 +197,9 @@ def zerodha_login():
     user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
     conn.close()
 
-    if not user or not user['app_key']:
-        return redirect("/zerodha_setup?error=Please set up your API key")
+    if not user or not user['app_key'] or not user['app_secret']:
+        flash('Please set up your API key and secret during signup.', 'error')
+        return redirect('/signup')
 
     kite.api_key = user['app_key']
     login_url = kite.login_url()
@@ -237,13 +244,10 @@ def dashboard():
 
     if not user['email_verified']:
         return redirect(f"/verify_otp?email={user['email']}")
-
-    if not user['app_key'] or not user['app_secret']:
-        return redirect('/zerodha_setup')
         
     try:
         if 'access_token' not in session:
-            return render_template("dashboard.html", user_name=None, balance='N/A', access_token=None)
+            return redirect('/welcome')
 
         kite.set_access_token(session['access_token'])
         profile = kite.profile()
