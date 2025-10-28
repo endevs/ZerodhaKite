@@ -1,2 +1,6 @@
 Run the FrontEnd - D:\WorkSpace\ZerodhaKite\.venv\WorkSpace\frontend>npm install
 Run the BackEnd - D:\WorkSpace\ZerodhaKite\.venv\WorkSpace\backend>uvicorn main:app --host 0.0.0.0 --port 8000
+
+.open D:\WorkSpace\ZerodhaKite\.venv\WorkSpace\backend\database.db
+D:\Software\sqlite-tools-win-x64-3500400
+D:\Software\DB.Browser.for.SQLite-v3.13.1-win64
