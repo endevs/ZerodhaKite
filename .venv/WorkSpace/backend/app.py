@@ -85,6 +85,8 @@ def signup():
     if request.method == 'POST':
         mobile = request.form['mobile']
         email = request.form['email']
+        app_key = request.form['app_key']
+        app_secret = request.form['app_secret']
 
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
@@ -95,8 +97,8 @@ def signup():
         otp = secrets.token_hex(3).upper()
         otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
 
-        conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
-                     (mobile, email, otp, otp_expiry))
+        conn.execute('INSERT INTO users (mobile, email, app_key, app_secret, otp, otp_expiry) VALUES (?, ?, ?, ?, ?, ?)',
+                     (mobile, email, app_key, app_secret, otp, otp_expiry))
         conn.commit()
         conn.close()
 
