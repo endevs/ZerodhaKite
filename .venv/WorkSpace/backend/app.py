@@ -260,8 +260,10 @@ def dashboard():
         # If the access token is invalid, redirect to the login page
         if "Invalid `api_key` or `access_token`" in str(e):
             session.pop('access_token', None)
-            return redirect("/zerodha_setup?error=Invalid API key or secret")
-        return "Error fetching data for dashboard", 500
+            flash('Your Zerodha session is invalid or expired. Please log in again.', 'error')
+            return redirect('/welcome')
+        flash('An unexpected error occurred while fetching dashboard data.', 'error')
+        return redirect('/welcome')
 
 
 @app.route("/logout")
