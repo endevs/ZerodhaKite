@@ -21,6 +21,28 @@ def create_tables():
             otp_expiry DATETIME
         )
     """)
+    conn.execute('DROP TABLE IF EXISTS strategies')
+    conn.execute("""
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            strategy_name TEXT NOT NULL,
+            instrument TEXT NOT NULL,
+            candle_time TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            stop_loss REAL NOT NULL,
+            target_profit REAL NOT NULL,
+            total_lot INTEGER NOT NULL,
+            trailing_stop_loss REAL NOT NULL,
+            segment TEXT NOT NULL,
+            trade_type TEXT NOT NULL,
+            strike_price TEXT NOT NULL,
+            expiry_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'saved',
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
     conn.commit()
     conn.close()
 

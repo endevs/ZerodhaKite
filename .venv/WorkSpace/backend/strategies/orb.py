@@ -4,8 +4,14 @@ import logging
 import datetime
 
 class ORB(BaseStrategy):
-    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, quantity, trailing_stop_loss):
-        super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, quantity, trailing_stop_loss)
+    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input):
+        super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input)
+        self.strategy_name_input = strategy_name_input
+        self.segment = segment
+        self.total_lot = int(total_lot)
+        self.trade_type = trade_type
+        self.strike_price = strike_price
+        self.expiry_type = expiry_type
         self.instrument_token = self._get_instrument_token()
         self.opening_range_high = 0
         self.opening_range_low = 0
@@ -21,69 +27,55 @@ class ORB(BaseStrategy):
             return 260105  # NIFTY BANK
         return None
 
-    def run(self):
-        logging.info(f"Running ORB strategy for {self.instrument}")
-
-        if not self.instrument_token:
-            logging.error(f"Could not find instrument token for {self.instrument}")
-            return
-
-        # Get historical data
-        to_date = datetime.date.today()
-        from_date = to_date - datetime.timedelta(days=5)  # Fetch data for the last 5 days
-        historical_data = self.kite.historical_data(self.instrument_token, from_date, to_date, f"{self.candle_time}minute")
-
-        if not historical_data:
-            logging.error("Could not fetch historical data.")
-            return
-
-        # Determine opening range
-        for candle in historical_data:
-            candle_time = candle['date']
-            if candle_time.time() >= datetime.datetime.strptime(self.start_time, '%H:%M').time():
-                self.opening_range_high = candle['high']
-                self.opening_range_low = candle['low']
-                break
-
-        logging.info(f"Opening Range for {self.instrument}: High={self.opening_range_high}, Low={self.opening_range_low}")
-
-    def process_ticks(self, ticks):
-        if self.trade_placed:
-            # Trailing stop loss logic
-            for tick in ticks:
-                if tick['instrument_token'] == self.instrument_token:
-                    ltp = tick['last_price']
-                    if self.trailing_stop_loss_price > 0 and ltp < self.trailing_stop_loss_price:
-                        logging.info(f"Trailing stop loss hit! LTP ({ltp}) < Trailing SL ({self.trailing_stop_loss_price})")
-                        self._square_off()
-                    elif ltp > self.trailing_stop_loss_price:
-                        self.trailing_stop_loss_price = ltp - (ltp * (float(self.trailing_stop_loss) / 100))
-            return
-
-        for tick in ticks:
-            if tick['instrument_token'] == self.instrument_token:
-                ltp = tick['last_price']
-                if ltp > self.opening_range_high:
-                    logging.info(f"Breakout detected! LTP ({ltp}) > Opening Range High ({self.opening_range_high})")
-                    self._place_order(ltp, 'CE')
-                    self.trade_placed = True
-                    self.trailing_stop_loss_price = ltp - (ltp * (float(self.trailing_stop_loss) / 100))
-                elif ltp < self.opening_range_low:
-                    logging.info(f"Breakdown detected! LTP ({ltp}) < Opening Range Low ({self.opening_range_low})")
-                    self._place_order(ltp, 'PE')
-                    self.trade_placed = True
-                    self.trailing_stop_loss_price = ltp + (ltp * (float(self.trailing_stop_loss) / 100))
-
     def _get_atm_option_symbol(self, ltp, option_type):
         instruments = self.kite.instruments('NFO')
         
+        # Filter instruments by expiry type
+        today = datetime.date.today()
+        if self.expiry_type == 'Weekly':
+            # Find the next Thursday (weekly expiry)
+            days_until_thursday = (3 - today.weekday() + 7) % 7
+            if days_until_thursday == 0: # If today is Thursday, use next Thursday
+                days_until_thursday = 7
+            expiry_date = today + datetime.timedelta(days=days_until_thursday)
+        elif self.expiry_type == 'Next Weekly':
+            # Find the Thursday after next Thursday
+            days_until_thursday = (3 - today.weekday() + 7) % 7
+            if days_until_thursday == 0: # If today is Thursday, use next Thursday
+                days_until_thursday = 7
+            expiry_date = today + datetime.timedelta(days=days_until_thursday + 7)
+        elif self.expiry_type == 'Monthly':
+            # Find the last Thursday of the current month
+            year = today.year
+            month = today.month
+            # Get the last day of the month
+            last_day_of_month = datetime.date(year, month, 1) + datetime.timedelta(days=32) - datetime.timedelta(days=1)
+            # Find the last Thursday
+            while last_day_of_month.weekday() != 3: # 3 is Thursday
+                last_day_of_month -= datetime.timedelta(days=1)
+            expiry_date = last_day_of_month
+        else:
+            expiry_date = today # Default to today if expiry_type is not recognized
+
+        # Format expiry date to match KiteConnect instrument format (YYYY-MM-DD)
+        expiry_date_str = expiry_date.strftime('%Y-%m-%d')
+
+        filtered_instruments = [inst for inst in instruments if 
+                                inst['name'] == self.instrument and 
+                                inst['instrument_type'] == option_type and
+                                inst['expiry'].strftime('%Y-%m-%d') == expiry_date_str]
+
         # Find the nearest strike price
-        strike_prices = [inst['strike'] for inst in instruments if inst['name'] == self.instrument and inst['instrument_type'] == option_type]
+        strike_prices = [inst['strike'] for inst in filtered_instruments]
+        if not strike_prices:
+            logging.warning(f"No strike prices found for {self.instrument} {option_type} with expiry {expiry_date_str}")
+            return None
+
         atm_strike = min(strike_prices, key=lambda x:abs(x-ltp))
 
         # Find the corresponding trading symbol
-        for inst in instruments:
-            if inst['name'] == self.instrument and inst['strike'] == atm_strike and inst['instrument_type'] == option_type:
+        for inst in filtered_instruments:
+            if inst['strike'] == atm_strike:
                 return inst['tradingsymbol']
         return None
 
@@ -93,13 +85,16 @@ class ORB(BaseStrategy):
             logging.error(f"Could not find ATM option for {self.instrument} {option_type}")
             return
 
-        logging.info(f"Placing order for {trading_symbol} with quantity {self.quantity}")
+        transaction_type = self.kite.TRANSACTION_TYPE_BUY if self.trade_type == 'Buy' else self.kite.TRANSACTION_TYPE_SELL
+        quantity = self.total_lot * 50 # Assuming 1 lot = 50 shares for NIFTY/BANKNIFTY
+
+        logging.info(f"Placing order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
         # self.kite.place_order(
         #     variety=self.kite.VARIETY_REGULAR,
         #     exchange=self.kite.EXCHANGE_NFO,
         #     tradingsymbol=trading_symbol,
-        #     transaction_type=self.kite.TRANSACTION_TYPE_BUY,
-        #     quantity=self.quantity,
+        #     transaction_type=transaction_type,
+        #     quantity=quantity,
         #     product=self.kite.PRODUCT_MIS,
         #     order_type=self.kite.ORDER_TYPE_MARKET
         # )
@@ -134,10 +129,10 @@ class ORB(BaseStrategy):
                     trade_placed = True
             else:
                 if candle['high'] > entry_price + (entry_price * (float(self.target_profit) / 100)):
-                    pnl += (entry_price * (float(self.target_profit) / 100)) * float(self.quantity)
+                    pnl += (entry_price * (float(self.target_profit) / 100)) * float(self.total_lot * 50) # Use total_lot
                     trade_placed = False
                 elif candle['low'] < entry_price - (entry_price * (float(self.stop_loss) / 100)):
-                    pnl -= (entry_price * (float(self.stop_loss) / 100)) * float(self.quantity)
+                    pnl -= (entry_price * (float(self.stop_loss) / 100)) * float(self.total_lot * 50) # Use total_lot
                     trade_placed = False
 
         return pnl, trades
