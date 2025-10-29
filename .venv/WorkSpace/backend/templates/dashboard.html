@@ -147,6 +147,10 @@
                                                 <label for="trailing-stop-loss" class="form-label">Trailing Stop Loss (%)</label>
                                                 <input type="number" class="form-control" id="trailing-stop-loss" name="trailing-stop-loss" value="0.5">
                                             </div>
+                                            <div class="col-md-6 mb-3 form-check mt-4">
+                                                <input type="checkbox" class="form-check-input" id="paper-trade" name="paper_trade">
+                                                <label class="form-check-label" for="paper-trade">Paper Trade</label>
+                                            </div>
                                         </div>
                                         <button type="submit" class="btn btn-primary">Save Strategy</button>
                                     </form>
@@ -184,13 +188,12 @@
                                             <td>
                                                 <button class="btn btn-sm btn-info edit-strategy" data-id="{{ strategy.id }}">Edit</button>
                                                 <button class="btn btn-sm btn-danger delete-strategy" data-id="{{ strategy.id }}">Delete</button>
-                                                {% if strategy.status == 'saved' or strategy.status == 'paused' or strategy.status == 'error' %}
-                                                <button class="btn btn-sm btn-success deploy-strategy" data-id="{{ strategy.id }}">Deploy</button>
-                                                {% elif strategy.status == 'running' %}
-                                                <button class="btn btn-sm btn-warning pause-strategy" data-id="{{ strategy.id }}">Pause</button>
-                                                <button class="btn btn-sm btn-danger squareoff-strategy" data-id="{{ strategy.id }}">Square Off</button>
-                                                {% endif %}
-                                            </td>
+                                                                            {% if strategy.status == 'saved' or strategy.status == 'paused' or strategy.status == 'error' or strategy.status == 'sq_off' %}
+                                                                                <button class="btn btn-sm btn-success deploy-strategy" data-id="{{ strategy.id }}">Deploy</button>
+                                                                            {% elif strategy.status == 'running' %}
+                                                                                <button class="btn btn-sm btn-warning pause-strategy" data-id="{{ strategy.id }}">Pause</button>
+                                                                                 <button class="btn btn-sm btn-danger squareoff-strategy" data-id="{{ strategy.id }}">Square Off</button>
+                                                                            {% endif %}                                            </td>
                                         </tr>
                                         {% else %}
                                         <tr>
@@ -253,6 +256,76 @@
                         <option value="NIFTY">NIFTY</option>
                         <option value="BANKNIFTY">BANKNIFTY</option>
                     </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-segment" class="form-label">Select Segment</label>
+                    <select class="form-select" id="backtest-segment" name="segment">
+                        <option value="Option" selected>Option</option>
+                        <option value="Future">Future</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-total-lot" class="form-label">Total Lot</label>
+                    <input type="number" class="form-control" id="backtest-total-lot" name="total-lot" min="1" max="50" value="1">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-trade-type" class="form-label">Buy or Sell</label>
+                    <select class="form-select" id="backtest-trade-type" name="trade-type">
+                        <option value="Buy" selected>Buy</option>
+                        <option value="Sell">Sell</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-strike-price" class="form-label">Strike Price</label>
+                    <input type="text" class="form-control" id="backtest-strike-price" name="strike-price" value="ATM">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-expiry-type" class="form-label">Expiry Type</label>
+                    <select class="form-select" id="backtest-expiry-type" name="expiry-type">
+                        <option value="Weekly">Weekly</option>
+                        <option value="Next Weekly">Next Weekly</option>
+                        <option value="Monthly">Monthly</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-candle-time" class="form-label">Candle Time</label>
+                    <select class="form-select" id="backtest-candle-time" name="candle-time">
+                        <option value="5">5 minutes</option>
+                        <option value="10">10 minutes</option>
+                        <option value="15">15 minutes</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-execution-start" class="form-label">Execution Start</label>
+                    <input type="time" class="form-control" id="backtest-execution-start" name="execution-start" value="09:15">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-execution-end" class="form-label">Execution End</label>
+                    <input type="time" class="form-control" id="backtest-execution-end" name="execution-end" value="15:00">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-stop-loss" class="form-label">Stop Loss (%)</label>
+                    <input type="number" class="form-control" id="backtest-stop-loss" name="stop-loss" value="1">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-target-profit" class="form-label">Target Profit (%)</label>
+                    <input type="number" class="form-control" id="backtest-target-profit" name="target-profit" value="2">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-trailing-stop-loss" class="form-label">Trailing Stop Loss (%)</label>
+                    <input type="number" class="form-control" id="backtest-trailing-stop-loss" name="trailing-stop-loss" value="0.5">
                 </div>
             </div>
             <div class="row">
@@ -340,7 +413,7 @@
                         <td>
                             <button class="btn btn-sm btn-info edit-strategy" data-id="${strategy.id}">Edit</button>
                             <button class="btn btn-sm btn-danger delete-strategy" data-id="${strategy.id}">Delete</button>
-                            ${(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error') ? 
+                            ${(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error' || strategy.status === 'sq_off') ? 
                                 `<button class="btn btn-sm btn-success deploy-strategy" data-id="${strategy.id}">Deploy</button>` : ''}
                             ${(strategy.status === 'running') ? 
                                 `<button class="btn btn-sm btn-warning pause-strategy" data-id="${strategy.id}">Pause</button>

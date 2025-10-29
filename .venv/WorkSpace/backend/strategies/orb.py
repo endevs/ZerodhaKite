@@ -4,7 +4,7 @@ import logging
 import datetime
 
 class ORB(BaseStrategy):
-    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input):
+    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input, paper_trade=False):
         super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input)
         self.strategy_name_input = strategy_name_input
         self.segment = segment
@@ -17,6 +17,7 @@ class ORB(BaseStrategy):
         self.opening_range_low = 0
         self.trade_placed = False
         self.trailing_stop_loss_price = 0
+        self.paper_trade = paper_trade
 
     def _get_instrument_token(self):
         # In a real application, you would have a more robust way to get the instrument token.
@@ -88,16 +89,29 @@ class ORB(BaseStrategy):
         transaction_type = self.kite.TRANSACTION_TYPE_BUY if self.trade_type == 'Buy' else self.kite.TRANSACTION_TYPE_SELL
         quantity = self.total_lot * 50 # Assuming 1 lot = 50 shares for NIFTY/BANKNIFTY
 
-        logging.info(f"Placing order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
-        # self.kite.place_order(
-        #     variety=self.kite.VARIETY_REGULAR,
-        #     exchange=self.kite.EXCHANGE_NFO,
-        #     tradingsymbol=trading_symbol,
-        #     transaction_type=transaction_type,
-        #     quantity=quantity,
-        #     product=self.kite.PRODUCT_MIS,
-        #     order_type=self.kite.ORDER_TYPE_MARKET
-        # )
+        if self.paper_trade:
+            logging.info(f"[PAPER TRADE] Simulating order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
+            # Here you would update a simulated P&L or log the trade in a simulated account
+        else:
+            logging.info(f"Placing LIVE order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
+            # self.kite.place_order(
+            #     variety=self.kite.VARIETY_REGULAR,
+            #     exchange=self.kite.EXCHANGE_NFO,
+            #     tradingsymbol=trading_symbol,
+            #     transaction_type=transaction_type,
+            #     quantity=quantity,
+            #     product=self.kite.PRODUCT_MIS,
+            #     order_type=self.kite.ORDER_TYPE_MARKET
+            # )
+
+    def run(self):
+        logging.info(f"Running ORB strategy for {self.instrument}")
+        # For now, we will just place an order based on the trade type.
+        # In a real scenario, this would involve continuous monitoring and decision making.
+        if self.trade_type == 'Buy':
+            self._place_order(self.kite.ltp(self.instrument_token)[str(self.instrument_token)]['last_price'], 'CE')
+        else:
+            self._place_order(self.kite.ltp(self.instrument_token)[str(self.instrument_token)]['last_price'], 'PE')
 
     def backtest(self, from_date, to_date):
         logging.info(f"Running backtest for {self.instrument} from {from_date} to {to_date}")

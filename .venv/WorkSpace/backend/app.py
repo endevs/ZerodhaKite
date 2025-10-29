@@ -363,9 +363,11 @@ def deploy_strategy(strategy_id):
     if not strategy_data:
         return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
 
+    paper_trade = request.form.get('paper_trade') == 'on'
+
     # Check if strategy is already running
-    for running_strat_id, running_strat_info in running_strategies.items():
-        if running_strat_info['db_id'] == strategy_id:
+    for unique_run_id, running_strat_info in running_strategies.items():
+        if running_strat_info['db_id'] == strategy_id and running_strat_info['status'] == 'running':
             return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
 
     try:
@@ -381,10 +383,11 @@ def deploy_strategy(strategy_id):
             strategy_data['total_lot'], # quantity is now total_lot
             strategy_data['trailing_stop_loss'],
             strategy_data['segment'],
-            strategy_data['total_lot'],
             strategy_data['trade_type'],
             strategy_data['strike_price'],
-            strategy_data['expiry_type']
+            strategy_data['expiry_type'],
+            strategy_data['strategy_name'],
+            paper_trade=paper_trade
         )
         strategy.run()
 
@@ -483,6 +486,60 @@ def cancel_strategy(strategy_id):
     if strategy_id in running_strategies:
         del running_strategies[strategy_id]
     return redirect("/dashboard")
+
+@app.route("/backtest", methods=['POST'])
+def backtest_strategy():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    # Extract strategy parameters from request form
+    instrument = request.form.get('backtest-instrument')
+    candle_time = request.form.get('candle-time') # Assuming this comes from the form
+    execution_start = request.form.get('execution-start') # Assuming this comes from the form
+    execution_end = request.form.get('execution-end') # Assuming this comes from the form
+    stop_loss = float(request.form.get('stop-loss')) # Assuming this comes from the form
+    target_profit = float(request.form.get('target-profit')) # Assuming this comes from the form
+    total_lot = int(request.form.get('total-lot')) # Assuming this comes from the form
+    trailing_stop_loss = float(request.form.get('trailing-stop-loss')) # Assuming this comes from the form
+    segment = request.form.get('segment') # Assuming this comes from the form
+    trade_type = request.form.get('trade-type') # Assuming this comes from the form
+    strike_price = request.form.get('strike-price') # Assuming this comes from the form
+    expiry_type = request.form.get('expiry-type') # Assuming this comes from the form
+    from_date_str = request.form.get('backtest-from-date')
+    to_date_str = request.form.get('backtest-to-date')
+
+    # Convert date strings to datetime objects
+    from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+    to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+
+    try:
+        # Instantiate ORB strategy (using dummy kite for backtesting if not logged in)
+        # In a real scenario, you might want to mock kite or ensure a valid connection for historical data
+        current_kite = kite # Use the global kite instance
+
+        orb_strategy = ORB(
+            current_kite,
+            instrument,
+            candle_time,
+            execution_start,
+            execution_end,
+            stop_loss,
+            target_profit,
+            total_lot,
+            trailing_stop_loss,
+            segment,
+            trade_type,
+            strike_price,
+            expiry_type,
+            "Backtest_ORB"
+        )
+
+        pnl, trades = orb_strategy.backtest(from_date, to_date)
+
+        return jsonify({'status': 'success', 'pnl': pnl, 'trades': trades})
+    except Exception as e:
+        logging.error(f"Error during backtest: {e}")
+        return jsonify({'status': 'error', 'message': f'Error during backtest: {e}'}), 500
 
 @socketio.on('connect')
 def connect(auth=None):
