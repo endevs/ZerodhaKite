@@ -594,7 +594,7 @@ def connect(auth=None):
 
         if ticker is None:
             # Pass strategy_name_input as the name parameter to Ticker
-            ticker = Ticker(user['app_key'], session['access_token'], list(running_strategies.values()), socketio, kite) # Pass kite object
+            ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
             ticker.start()
     emit('my_response', {'data': 'Connected'})
 
@@ -726,6 +726,18 @@ def stop_tick_collection():
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'})
+
+@app.route("/strategy/status/<strategy_id>")
+def strategy_status(strategy_id):
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    # Find the running strategy by its db_id
+    for unique_run_id, running_strat_info in running_strategies.items():
+        if running_strat_info['db_id'] == int(strategy_id):
+            return jsonify(running_strat_info['strategy'].status)
+    
+    return jsonify({'status': 'error', 'message': 'Strategy not running'}), 404
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, port=8000, allow_unsafe_werkzeug=True)

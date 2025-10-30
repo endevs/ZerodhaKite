@@ -18,6 +18,14 @@ class ORB(BaseStrategy):
         self.trade_placed = False
         self.trailing_stop_loss_price = 0
         self.paper_trade = paper_trade
+        self.status = {
+            'state': 'initializing',
+            'message': 'Strategy is initializing.',
+            'opening_range_high': 0,
+            'opening_range_low': 0,
+            'current_price': 0,
+            'pnl': 0
+        }
 
     def _get_instrument_token(self):
         # In a real application, you would have a more robust way to get the instrument token.
@@ -106,12 +114,66 @@ class ORB(BaseStrategy):
 
     def run(self):
         logging.info(f"Running ORB strategy for {self.instrument}")
-        # For now, we will just place an order based on the trade type.
-        # In a real scenario, this would involve continuous monitoring and decision making.
-        if self.trade_type == 'Buy':
-            self._place_order(self.kite.ltp(self.instrument_token)[str(self.instrument_token)]['last_price'], 'CE')
-        else:
-            self._place_order(self.kite.ltp(self.instrument_token)[str(self.instrument_token)]['last_price'], 'PE')
+        self.status['state'] = 'running'
+        self.status['message'] = 'Strategy is running and waiting for ticks.'
+
+    def process_ticks(self, ticks):
+        if self.status['state'] == 'initializing':
+            self.status['state'] = 'waiting_for_opening_range'
+            self.status['message'] = f"Waiting for the first {self.candle_time} minutes to form the opening range."
+
+        start_time = datetime.datetime.strptime(self.start_time, '%H:%M').time()
+        opening_range_end_time = (datetime.datetime.combine(datetime.date.today(), start_time) + datetime.timedelta(minutes=int(self.candle_time))).time()
+
+        for tick in ticks:
+            if tick['instrument_token'] != self.instrument_token:
+                continue
+
+            self.status['current_price'] = tick['last_price']
+
+            timestamp = None
+            if 'timestamp' in tick:
+                timestamp = tick['timestamp']
+            elif 'last_trade_time' in tick:
+                timestamp = tick['last_trade_time']
+            elif 'exchange_timestamp' in tick:
+                timestamp = tick['exchange_timestamp']
+
+            if timestamp:
+                if isinstance(timestamp, datetime.datetime):
+                    tick_time = timestamp.time()
+                else:
+                    tick_time = datetime.datetime.fromtimestamp(timestamp).time()
+            else:
+                continue # Skip ticks without a timestamp
+
+            # Calculate opening range
+            if start_time <= tick_time < opening_range_end_time:
+                if self.status['opening_range_high'] == 0:
+                    self.status['opening_range_high'] = tick['last_price']
+                    self.status['opening_range_low'] = tick['last_price']
+                else:
+                    self.status['opening_range_high'] = max(self.status['opening_range_high'], tick['last_price'])
+                    self.status['opening_range_low'] = min(self.status['opening_range_low'], tick['last_price'])
+                self.status['message'] = f"Calculating opening range. High: {self.status['opening_range_high']}, Low: {self.status['opening_range_low']}"
+
+            # Monitor for breakout
+            elif tick_time >= opening_range_end_time and not self.trade_placed:
+                self.status['state'] = 'monitoring_for_breakout'
+                self.status['message'] = f"Monitoring for breakout. High: {self.status['opening_range_high']}, Low: {self.status['opening_range_low']}"
+                
+                if tick['last_price'] > self.status['opening_range_high']:
+                    self.trade_placed = True
+                    self.status['state'] = 'trade_placed'
+                    self.status['message'] = f"Long trade placed at {tick['last_price']}"
+                    self._place_order(tick['last_price'], 'CE')
+                elif tick['last_price'] < self.status['opening_range_low']:
+                    self.trade_placed = True
+                    self.status['state'] = 'trade_placed'
+                    self.status['message'] = f"Short trade placed at {tick['last_price']}"
+                    self._place_order(tick['last_price'], 'PE')
+            
+            # TODO: Add logic for squaring off the position based on target/stop-loss
 
     def backtest(self, from_date, to_date):
         logging.info(f"Running backtest for {self.instrument} from {from_date} to {to_date}")

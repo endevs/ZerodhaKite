@@ -6,9 +6,9 @@ from database import get_db_connection
 from utils import get_option_symbols
 
 class Ticker:
-    def __init__(self, api_key, access_token, strategies, socketio, kite):
+    def __init__(self, api_key, access_token, running_strategies, socketio, kite):
         self.kws = KiteTicker(api_key, access_token)
-        self.strategies = strategies
+        self.running_strategies = running_strategies
         self.socketio = socketio
         self.kite = kite
         self.kws.on_ticks = self.on_ticks
@@ -99,8 +99,8 @@ class Ticker:
 
         conn.close()
 
-        for strategy in self.strategies:
-            strategy.process_ticks(ticks)
+        for strategy_info in self.running_strategies.values():
+            strategy_info['strategy'].process_ticks(ticks)
         
         # Broadcast ticks to the frontend
         for tick in ticks:
@@ -125,8 +125,8 @@ class Ticker:
         banknifty_monthly_options = get_option_symbols(self.kite, 'BANKNIFTY', 'monthly', 10)
         instrument_tokens.extend(banknifty_monthly_options)
 
-        for strategy in self.strategies:
-            instrument_tokens.append(strategy.instrument_token)
+        for strategy_info in self.running_strategies.values():
+            instrument_tokens.append(strategy_info['strategy'].instrument_token)
         
         # Remove duplicates
         instrument_tokens = list(set(instrument_tokens))

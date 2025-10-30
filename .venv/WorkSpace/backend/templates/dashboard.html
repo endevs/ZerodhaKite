@@ -198,7 +198,8 @@
                                                                                 <button class="btn btn-sm btn-success deploy-strategy" data-id="{{ strategy.id }}">Deploy</button>
                                                                             {% elif strategy.status == 'running' %}
                                                                                 <button class="btn btn-sm btn-warning pause-strategy" data-id="{{ strategy.id }}">Pause</button>
-                                                                                 <button class="btn btn-sm btn-danger squareoff-strategy" data-id="{{ strategy.id }}">Square Off</button>
+                                                                                <button class="btn btn-sm btn-danger squareoff-strategy" data-id="{{ strategy.id }}">Square Off</button>
+                                                                                <button class="btn btn-sm btn-primary view-live" data-id="{{ strategy.id }}">View Live</button>
                                                                             {% endif %}                                            </td>
                                         </tr>
                                         {% else %}
@@ -400,6 +401,19 @@
         </table>
     </div>
 
+    <div class="modal fade" id="live-strategy-modal" tabindex="-1" aria-labelledby="live-strategy-modal-label" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="live-strategy-modal-label">Live Strategy Status</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="live-strategy-panel">
+            <!-- Content will be loaded here by JavaScript -->
+          </div>
+        </div>
+      </div>
+    </div>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', (event) => {
@@ -553,7 +567,8 @@
                                 `<button class="btn btn-sm btn-success deploy-strategy" data-id="${strategy.id}">Deploy</button>` : ''}
                             ${(strategy.status === 'running') ? 
                                 `<button class="btn btn-sm btn-warning pause-strategy" data-id="${strategy.id}">Pause</button>
-                                 <button class="btn btn-sm btn-danger squareoff-strategy" data-id="${strategy.id}">Square Off</button>` : ''}
+                                 <button class="btn btn-sm btn-danger squareoff-strategy" data-id="${strategy.id}">Square Off</button>
+                                 <button class="btn btn-sm btn-primary view-live" data-id="${strategy.id}">View Live</button>` : ''}
                         </td>
                     `;
                     strategiesBody.appendChild(row);
@@ -580,7 +595,46 @@
                 document.querySelectorAll('.squareoff-strategy').forEach(button => {
                     button.onclick = (e) => handleSquareOffStrategy(e.target.dataset.id);
                 });
+                document.querySelectorAll('.view-live').forEach(button => {
+                    button.addEventListener('click', (e) => {
+                        const strategyId = e.target.dataset.id;
+                        const modal = new bootstrap.Modal(document.getElementById('live-strategy-modal'));
+                        modal.show();
+                        
+                        fetchLiveStrategyStatus(strategyId);
+                        liveStrategyInterval = setInterval(() => fetchLiveStrategyStatus(strategyId), 2000); // Refresh every 2 seconds
+                    });
+                });
             }
+
+            let liveStrategyInterval;
+
+            function fetchLiveStrategyStatus(strategyId) {
+                fetch(`/strategy/status/${strategyId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'error') {
+                            document.getElementById('live-strategy-panel').innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+                            clearInterval(liveStrategyInterval);
+                            return;
+                        }
+
+                        const panel = document.getElementById('live-strategy-panel');
+                        panel.innerHTML = `
+                            <p><strong>State:</strong> ${data.state}</p>
+                            <p><strong>Message:</strong> ${data.message}</p>
+                            <p><strong>Current Price:</strong> ${data.current_price}</p>
+                            <p><strong>Opening Range High:</strong> ${data.opening_range_high}</p>
+                            <p><strong>Opening Range Low:</strong> ${data.opening_range_low}</p>
+                            <p><strong>P&L:</strong> ${data.pnl}</p>
+                        `;
+                    });
+            }
+
+            // Stop the interval when the modal is closed
+            document.getElementById('live-strategy-modal').addEventListener('hidden.bs.modal', () => {
+                clearInterval(liveStrategyInterval);
+            });
 
             // Function to fetch strategies from backend and populate table
             function fetchStrategiesAndPopulateTable() {
