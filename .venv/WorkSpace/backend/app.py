@@ -435,6 +435,7 @@ def deploy_strategy(strategy_id):
             'name': strategy_data['strategy_name'],
             'instrument': strategy_data['instrument'],
             'status': 'running',
+            'strategy_type': strategy_type, # Add strategy_type here
             'strategy': strategy # Store the actual strategy object
         }
 
@@ -761,7 +762,11 @@ def strategy_status(strategy_id):
     # Find the running strategy by its db_id
     for unique_run_id, running_strat_info in running_strategies.items():
         if running_strat_info['db_id'] == int(strategy_id):
-            return jsonify(running_strat_info['strategy'].status)
+            strategy_obj = running_strat_info['strategy']
+            status_data = strategy_obj.status
+            status_data['strategy_type'] = running_strat_info['strategy_type'] # Add strategy type
+            status_data['strategy_name_display'] = running_strat_info['name'] # Add strategy display name
+            return jsonify(status_data)
     
     return jsonify({'status': 'error', 'message': 'Strategy not running'}), 404
 

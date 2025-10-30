@@ -701,26 +701,71 @@
                             return;
                         }
 
+                        // Update modal title with strategy name
+                        document.getElementById('live-strategy-modal-label').textContent = `Live Status: ${data.strategy_name_display}`;
+
                         const panel = document.getElementById('live-strategy-panel');
-                        let tradeHistoryHtml = data.trade_history.map(trade => `
-                            <li>[${trade.time}] ${trade.action} ${trade.instrument} @ ${trade.price} (Order ID: ${trade.order_id})</li>
-                        `).join('');
+                        let tradeHistoryHtml = '';
+                        if (data.trade_history && data.trade_history.length > 0) {
+                            tradeHistoryHtml = `
+                                <table class="table table-striped table-sm">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Action</th>
+                                            <th>Instrument</th>
+                                            <th>Price</th>
+                                            <th>Order ID</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${data.trade_history.map(trade => `
+                                            <tr>
+                                                <td>${trade.time}</td>
+                                                <td>${trade.action}</td>
+                                                <td>${trade.instrument}</td>
+                                                <td>${trade.price.toFixed(2)}</td>
+                                                <td>${trade.order_id}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            `;
+                        } else {
+                            tradeHistoryHtml = '<p>No trade history yet.</p>';
+                        }
+
+                        let strategySpecificDetails = '';
+                        if (data.strategy_type === 'orb') {
+                            strategySpecificDetails = `
+                                <p><strong>Opening Range High:</strong> ${data.opening_range_high.toFixed(2)}</p>
+                                <p><strong>Opening Range Low:</strong> ${data.opening_range_low.toFixed(2)}</p>
+                            `;
+                        } else if (data.strategy_type === 'capture_mountain_signal') {
+                            strategySpecificDetails = `
+                                <p><strong>Current LTP:</strong> ${data.current_ltp.toFixed(2)}</p>
+                                <p><strong>Signal Status:</strong> ${data.signal_status}</p>
+                                <p><strong>Signal Candle Time:</strong> ${data.signal_candle_time}</p>
+                                <p><strong>Signal Candle High:</strong> ${data.signal_candle_high.toFixed(2)}</p>
+                                <p><strong>Signal Candle Low:</strong> ${data.signal_candle_low.toFixed(2)}</p>
+                            `;
+                        }
 
                         panel.innerHTML = `
                             ${data.paper_trade_mode ? '<div class="alert alert-info"><strong>PAPER TRADE MODE ACTIVE</strong></div>' : ''}
                             <p><strong>State:</strong> ${data.state}</p>
                             <p><strong>Message:</strong> ${data.message}</p>
+                            ${strategySpecificDetails}
                             <p><strong>Instrument:</strong> ${data.traded_instrument || 'N/A'}</p>
-                            <p><strong>Current Price:</strong> ${data.current_price.toFixed(2)}</p>
-                            <p><strong>Candle Time Frame:</strong> ${data.candle_time_frame} minutes</p>
-                            <p><strong>Opening Range High:</strong> ${data.opening_range_high.toFixed(2)}</p>
-                            <p><strong>Opening Range Low:</strong> ${data.opening_range_low.toFixed(2)}</p>
                             <p><strong>Entry Price:</strong> ${data.entry_price.toFixed(2)}</p>
                             <p><strong>Stop Loss Level:</strong> ${data.stop_loss_level.toFixed(2)}</p>
-                            <p><strong>Target Profit Level:</strong> ${data.target_profit_level.toFixed(2)}</p>
+                            <p><strong>Target Profit Level:</strong> ${data.target_profit_level !== 'N/A' && !isNaN(data.target_profit_level) ? data.target_profit_level.toFixed(2) : 'N/A'}</p>
+                            <p><strong>Entry Order ID:</strong> ${data.entry_order_id}</p>
+                            <p><strong>SL Order ID:</strong> ${data.sl_order_id}</p>
+                            <p><strong>TP Order ID:</strong> ${data.tp_order_id}</p>
                             <p><strong>Live P&L:</strong> ${data.pnl.toFixed(2)}</p>
                             <h5>Trade History</h5>
-                            <ul>${tradeHistoryHtml}</ul>
+                            ${tradeHistoryHtml}
                         `;
                     });
             }
