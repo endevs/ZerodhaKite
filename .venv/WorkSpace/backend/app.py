@@ -6,6 +6,7 @@ import random
 import time
 from threading import Thread
 from strategies.orb import ORB
+from strategies.capture_mountain_signal import CaptureMountainSignal
 from ticker import Ticker
 import uuid
 import sqlite3
@@ -306,6 +307,7 @@ def save_strategy():
     user_id = session['user_id']
     strategy_id = request.form.get('strategy_id') # Will be present if editing an existing strategy
     strategy_name_input = request.form.get('strategy-name')
+    strategy_type = request.form.get('strategy')
     instrument = request.form.get('instrument')
     candle_time = request.form.get('candle-time')
     execution_start = request.form.get('execution-start')
@@ -318,21 +320,22 @@ def save_strategy():
     trade_type = request.form.get('trade-type')
     strike_price = request.form.get('strike-price')
     expiry_type = request.form.get('expiry-type')
+    ema_period = request.form.get('ema-period')
 
     conn = get_db_connection()
     try:
         if strategy_id:
             # Update existing strategy
             conn.execute(
-                'UPDATE strategies SET strategy_name = ?, instrument = ?, candle_time = ?, start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ? WHERE id = ? AND user_id = ?',
-                (strategy_name_input, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_id, user_id)
+                'UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ?, ema_period = ? WHERE id = ? AND user_id = ?',
+                (strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period, strategy_id, user_id)
             )
             message = 'Strategy updated successfully!'
         else:
             # Insert new strategy
             conn.execute(
-                'INSERT INTO strategies (user_id, strategy_name, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (user_id, strategy_name_input, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type)
+                'INSERT INTO strategies (user_id, strategy_name, strategy_type, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (user_id, strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period)
             )
             message = 'Strategy saved successfully!'
         conn.commit()
@@ -394,9 +397,19 @@ def deploy_strategy(strategy_id):
         if running_strat_info['db_id'] == strategy_id and running_strat_info['status'] == 'running' and strategy_data['status'] != 'sq_off':
             return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
 
+    strategy_type = strategy_data['strategy_type']
+
     try:
-        # Instantiate the ORB strategy with saved parameters
-        strategy = ORB(
+        strategy_class = None
+        if strategy_type == 'orb':
+            strategy_class = ORB
+        elif strategy_type == 'capture_mountain_signal':
+            strategy_class = CaptureMountainSignal
+        else:
+            return jsonify({'status': 'error', 'message': 'Unknown strategy'}), 400
+
+        # Instantiate the strategy with saved parameters
+        strategy = strategy_class(
             kite,
             strategy_data['instrument'],
             strategy_data['candle_time'],
@@ -404,7 +417,7 @@ def deploy_strategy(strategy_id):
             strategy_data['end_time'],
             strategy_data['stop_loss'],
             strategy_data['target_profit'],
-            strategy_data['total_lot'], # quantity is now total_lot
+            strategy_data['total_lot'],
             strategy_data['trailing_stop_loss'],
             strategy_data['segment'],
             strategy_data['trade_type'],

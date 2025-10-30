@@ -27,6 +27,7 @@ def create_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             strategy_name TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
             instrument TEXT NOT NULL,
             candle_time TEXT NOT NULL,
             start_time TEXT NOT NULL,
@@ -39,6 +40,7 @@ def create_tables():
             trade_type TEXT NOT NULL,
             strike_price TEXT NOT NULL,
             expiry_type TEXT NOT NULL,
+            ema_period INTEGER,
             status TEXT NOT NULL DEFAULT 'saved',
             FOREIGN KEY (user_id) REFERENCES users (id)
         )

@@ -4,6 +4,20 @@ import logging
 import datetime
 
 class ORB(BaseStrategy):
+    description = """
+    ## Opening Range Breakout (ORB)
+
+    This strategy identifies the high and low of the opening range and places a trade when the price breaks out of this range.
+
+    **Timeframe:** Configurable (e.g., 15 minutes)
+    **Instruments:** Nifty & BankNifty
+
+    ### Logic
+    - **Opening Range:** The high and low of the first 'x' minutes of the trading session.
+    - **Buy Signal:** Price breaks above the opening range high.
+    - **Sell Signal:** Price breaks below the opening range low.
+    - **Stop Loss & Target:** Configurable percentages.
+    """
     def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input, paper_trade=False):
         super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input)
         self.strategy_name_input = strategy_name_input

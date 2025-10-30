@@ -61,18 +61,27 @@
                                 <div class="mb-3">
                                     <label for="strategy-select" class="form-label">Select Strategy</label>
                                     <select class="form-select" id="strategy-select">
+                                        <option value="" disabled selected>Select Strategy</option>
                                         <option value="orb">Opening Range Breakout (ORB)</option>
+                                        <option value="capture_mountain_signal">Capture Mountain Signal</option>
                                     </select>
                                 </div>
+                                <div id="strategy-description" class="alert alert-info"></div>
                                 <div id="orb-strategy-form">
                                     <div id="success-message" class="alert alert-success" style="display: none;"></div>
                                     <form id="strategy-form" action="/strategy/save" method="POST">
-                                        <input type="hidden" name="strategy" value="orb">
+                                        <input type="hidden" name="strategy" id="strategy-input" value="orb">
                                         <input type="hidden" name="strategy_id" id="strategy-id">
                                         <div class="row">
                                             <div class="col-md-12 mb-3">
                                                 <label for="strategy-name" class="form-label">Strategy Name</label>
                                                 <input type="text" class="form-control" id="strategy-name" name="strategy-name" required>
+                                            </div>
+                                        </div>
+                                        <div class="row" id="ema-period-row" style="display: none;">
+                                            <div class="col-md-12 mb-3">
+                                                <label for="ema-period" class="form-label">EMA Period</label>
+                                                <input type="number" class="form-control" id="ema-period" name="ema-period" value="5">
                                             </div>
                                         </div>
                                         <div class="row">
@@ -433,6 +442,42 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
+        const strategyDescriptions = {
+            'orb': `
+                <h5>Opening Range Breakout (ORB)</h5>
+                <p>This strategy identifies the high and low of the opening range and places a trade when the price breaks out of this range.</p>
+                <strong>Timeframe:</strong> Configurable (e.g., 15 minutes)<br>
+                <strong>Instruments:</strong> Nifty & BankNifty<br>
+                <strong>Logic:</strong><br>
+                <ul>
+                    <li><strong>Opening Range:</strong> The high and low of the first 'x' minutes of the trading session.</li>
+                    <li><strong>Buy Signal:</strong> Price breaks above the opening range high.</li>
+                    <li><strong>Sell Signal:</strong> Price breaks below the opening range low.</li>
+                    <li><strong>Stop Loss & Target:</strong> Configurable percentages.</li>
+                </ul>
+            `,
+            'capture_mountain_signal': `
+                <h5>Capture Mountain Signal</h5>
+                <p><strong>Instruments:</strong> Nifty & BankNifty ATM Options</p>
+                <p><strong>Timeframe:</strong> 5-minute candles</p>
+                <p><strong>Indicator:</strong> 5-period EMA</p>
+                <h6>PE (Put Entry) Logic</h6>
+                <ul>
+                    <li><strong>Signal Candle:</strong> Candle's LOW > 5 EMA</li>
+                    <li><strong>Entry Trigger:</strong> Next candle CLOSE < signal candle's LOW</li>
+                    <li><strong>Stop Loss:</strong> Price closes above signal candle's HIGH</li>
+                    <li><strong>Target:</strong> Wait for at least 1 candle where HIGH < 5 EMA, then if 2 consecutive candles CLOSE > 5 EMA -> Exit PE trade</li>
+                </ul>
+                <h6>CE (Call Entry) Logic</h6>
+                <ul>
+                    <li><strong>Signal Candle:</strong> Candle's HIGH < 5 EMA</li>
+                    <li><strong>Entry Trigger:</strong> Next candle CLOSE > signal candle's HIGH</li>
+                    <li><strong>Stop Loss:</strong> Price closes below signal candle's LOW</li>
+                    <li><strong>Target:</strong> Wait for at least 1 candle where LOW > 5 EMA, then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade</li>
+                </ul>
+            `
+        };
+
         function openChartModal(instrument) {
             console.log('Opening chart for:', instrument);
             const chartModal = new bootstrap.Modal(document.getElementById('chart-modal'));
@@ -440,6 +485,28 @@
         }
 
         document.addEventListener('DOMContentLoaded', (event) => {
+            const strategySelect = document.getElementById('strategy-select');
+            const strategyDescription = document.getElementById('strategy-description');
+            const emaPeriodRow = document.getElementById('ema-period-row');
+            const strategyInput = document.getElementById('strategy-input');
+
+            function updateStrategyView() {
+                const selectedStrategy = strategySelect.value;
+                strategyDescription.innerHTML = strategyDescriptions[selectedStrategy];
+                strategyInput.value = selectedStrategy;
+
+                if (selectedStrategy === 'capture_mountain_signal') {
+                    emaPeriodRow.style.display = 'block';
+                } else {
+                    emaPeriodRow.style.display = 'none';
+                }
+            }
+
+            strategySelect.addEventListener('change', updateStrategyView);
+
+            // Initial view setup
+            updateStrategyView();
+
             const dashboardTab = document.getElementById('dashboard-tab');
             const backtestTab = document.getElementById('backtest-tab');
             const marketReplayTab = document.getElementById('market-replay-tab');
@@ -538,10 +605,6 @@
                 fetchTickDataStatus();
             });
 
-            document.getElementById('refresh-tick-collection').addEventListener('click', () => {
-                fetchTickDataStatus();
-            });
-
             var socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 
             socket.on('connect', function() {
@@ -562,22 +625,11 @@
                 if (bankniftyPriceElement && msg.banknifty_price) {
                     bankniftyPriceElement.textContent = msg.banknifty_price;
                 }
-                
-                // const pnlElement = document.getElementById('pnl');
-                // pnlElement.textContent = msg.pnl;
-                // if (msg.pnl > 0) {
-                //     pnlElement.style.color = 'green';
-                // } else if (msg.pnl < 0) {
-                //     pnlElement.style.color = 'red';
-                // } else {
-                //     pnlElement.style.color = 'black';
-                // }
             });
 
-            // Function to populate the saved strategies table
             function populateSavedStrategiesTable(strategies) {
                 const strategiesBody = document.getElementById('saved-strategies-table-body');
-                strategiesBody.innerHTML = ''; // Clear existing rows
+                strategiesBody.innerHTML = '';
 
                 if (strategies.length === 0) {
                     strategiesBody.innerHTML = '<tr><td colspan="6">No strategies saved yet.</td></tr>';
@@ -606,11 +658,9 @@
                     strategiesBody.appendChild(row);
                 });
 
-                // Attach event listeners to new buttons
                 attachStrategyButtonListeners();
             }
 
-            // Function to attach event listeners to strategy action buttons
             function attachStrategyButtonListeners() {
                 document.querySelectorAll('.edit-strategy').forEach(button => {
                     button.onclick = (e) => handleEditStrategy(e.target.dataset.id);
@@ -634,7 +684,7 @@
                         modal.show();
                         
                         fetchLiveStrategyStatus(strategyId);
-                        liveStrategyInterval = setInterval(() => fetchLiveStrategyStatus(strategyId), 2000); // Refresh every 2 seconds
+                        liveStrategyInterval = setInterval(() => fetchLiveStrategyStatus(strategyId), 2000);
                     });
                 });
             }
@@ -675,12 +725,10 @@
                     });
             }
 
-            // Stop the interval when the modal is closed
             document.getElementById('live-strategy-modal').addEventListener('hidden.bs.modal', () => {
                 clearInterval(liveStrategyInterval);
             });
 
-            // Function to fetch strategies from backend and populate table
             function fetchStrategiesAndPopulateTable() {
                 fetch('/api/strategies')
                     .then(response => response.json())
@@ -695,10 +743,8 @@
                     .catch(error => console.error('Error fetching strategies:', error));
             }
 
-            // Initial population of the table
             fetchStrategiesAndPopulateTable();
 
-            // Handle Edit Strategy
             function handleEditStrategy(strategyId) {
                 fetch(`/strategy/edit/${strategyId}`)
                     .then(response => response.json())
@@ -719,8 +765,11 @@
                             document.getElementById('trade-type').value = strategy.trade_type;
                             document.getElementById('strike-price').value = strategy.strike_price;
                             document.getElementById('expiry-type').value = strategy.expiry_type;
+                            
+                            const strategySelect = document.getElementById('strategy-select');
+                            strategySelect.value = strategy.strategy;
+                            updateStrategyView();
 
-                            // Expand the configuration section
                             const collapseOne = new bootstrap.Collapse(document.getElementById('collapseOne'), { toggle: false });
                             collapseOne.show();
                         } else {
@@ -733,14 +782,11 @@
                     });
             }
 
-            // Handle Delete Strategy
             function handleDeleteStrategy(strategyId) {
                 if (!confirm('Are you sure you want to delete this strategy?')) {
                     return;
                 }
-                fetch(`/strategy/delete/${strategyId}`, {
-                    method: 'POST'
-                })
+                fetch(`/strategy/delete/${strategyId}`, { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
@@ -756,15 +802,12 @@
                 });
             }
 
-            // Handle Deploy Strategy
             function handleDeployStrategy(strategyId) {
                 const deployButton = document.querySelector(`.deploy-strategy[data-id='${strategyId}']`);
                 deployButton.disabled = true;
                 deployButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Deploying...';
 
-                fetch(`/strategy/deploy/${strategyId}`, {
-                    method: 'POST'
-                })
+                fetch(`/strategy/deploy/${strategyId}`, { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
@@ -784,11 +827,8 @@
                 });
             }
 
-            // Handle Pause Strategy
             function handlePauseStrategy(strategyId) {
-                fetch(`/strategy/pause/${strategyId}`, {
-                    method: 'POST'
-                })
+                fetch(`/strategy/pause/${strategyId}`, { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
@@ -804,14 +844,11 @@
                 });
             }
 
-            // Handle Square Off Strategy
             function handleSquareOffStrategy(strategyId) {
                 if (!confirm('Are you sure you want to square off this strategy?')) {
                     return;
                 }
-                fetch(`/strategy/squareoff/${strategyId}`, {
-                    method: 'POST'
-                })
+                fetch(`/strategy/squareoff/${strategyId}`, { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
@@ -826,29 +863,6 @@
                     alert('An error occurred while squaring off the strategy.');
                 });
             }
-
-            // Initial fetch and populate for running strategies (if still needed, otherwise remove)
-            // function fetchRunningStrategies() {
-            //     fetch('/strategies')
-            //         .then(response => response.json())
-            //         .then(data => {
-            //             const strategiesBody = document.getElementById('running-strategies');
-            //             strategiesBody.innerHTML = '';
-            //             for (const [id, strategy] of Object.entries(data)) {
-            //                 const row = document.createElement('tr');
-            //                 row.innerHTML = `
-            //                     <td>${id}</td>
-            //                     <td>${strategy.name}</td>
-            //                     <td>${strategy.instrument}</td>
-            //                     <td>${strategy.status}</td>
-            //                     <td><a href="/strategy/cancel/${id}" class="btn btn-danger btn-sm">Cancel</a></td>
-            //                 `;
-            //                 strategiesBody.appendChild(row);
-            //             }
-            //         });
-            // }
-
-            // setInterval(fetchRunningStrategies, 5000); // Refresh every 5 seconds
 
             document.getElementById('strategy-form').addEventListener('submit', function(event) {
                 event.preventDefault();
