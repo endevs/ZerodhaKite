@@ -43,6 +43,35 @@ def create_tables():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     """)
+    conn.execute('DROP TABLE IF EXISTS market_data')
+    conn.execute('''
+        CREATE TABLE market_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_token INTEGER NOT NULL,
+            trading_symbol TEXT NOT NULL,
+            timestamp DATETIME NOT NULL,
+            last_price REAL,
+            volume INTEGER,
+            instrument_type TEXT
+        )
+    ''')
+    conn.execute('DROP TABLE IF EXISTS tick_data')
+    conn.execute('''
+        CREATE TABLE tick_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_token INTEGER NOT NULL,
+            timestamp DATETIME NOT NULL,
+            last_price REAL NOT NULL,
+            volume INTEGER
+        )
+    ''')
+    conn.execute('DROP TABLE IF EXISTS tick_data_status')
+    conn.execute('''
+        CREATE TABLE tick_data_status (
+            instrument_token INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'Stopped'
+        )
+    ''')
     conn.commit()
     conn.close()
 

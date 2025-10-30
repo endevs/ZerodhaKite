@@ -150,3 +150,66 @@ class ORB(BaseStrategy):
                     trade_placed = False
 
         return pnl, trades
+
+    def replay(self, ticks):
+        logging.info(f"Running replay for {self.instrument}")
+
+        pnl = 0
+        trades = 0
+        trade_placed = False
+        entry_price = 0
+        opening_range_high = 0
+        opening_range_low = 0
+        start_time = datetime.datetime.strptime(self.start_time, '%H:%M').time()
+
+        # First, find the opening range from the ticks
+        for tick in ticks:
+            tick_time = datetime.datetime.strptime(tick['timestamp'], '%Y-%m-%d %H:%M:%S').time()
+            if tick_time >= start_time:
+                if opening_range_high == 0:
+                    opening_range_high = tick['last_price']
+                    opening_range_low = tick['last_price']
+                else:
+                    opening_range_high = max(opening_range_high, tick['last_price'])
+                    opening_range_low = min(opening_range_low, tick['last_price'])
+
+            # Assuming the opening range is for the first 15 minutes
+            if tick_time >= (datetime.datetime.combine(datetime.date.today(), start_time) + datetime.timedelta(minutes=15)).time():
+                break
+
+        # Now, process the rest of the ticks for trading
+        for tick in ticks:
+            tick_time = datetime.datetime.strptime(tick['timestamp'], '%Y-%m-%d %H:%M:%S').time()
+            if tick_time < (datetime.datetime.combine(datetime.date.today(), start_time) + datetime.timedelta(minutes=15)).time():
+                continue
+
+            if not trade_placed:
+                if tick['last_price'] > opening_range_high:
+                    trades += 1
+                    entry_price = opening_range_high
+                    trade_placed = True
+                    # This is a buy, so we are long
+                    position = 1
+                elif tick['last_price'] < opening_range_low:
+                    trades += 1
+                    entry_price = opening_range_low
+                    trade_placed = True
+                    # This is a sell, so we are short
+                    position = -1
+            else:
+                if position == 1: # Long position
+                    if tick['last_price'] > entry_price + (entry_price * (self.target_profit / 100)):
+                        pnl += (entry_price * (self.target_profit / 100)) * self.total_lot * 50
+                        trade_placed = False
+                    elif tick['last_price'] < entry_price - (entry_price * (self.stop_loss / 100)):
+                        pnl -= (entry_price * (self.stop_loss / 100)) * self.total_lot * 50
+                        trade_placed = False
+                elif position == -1: # Short position
+                    if tick['last_price'] < entry_price - (entry_price * (self.target_profit / 100)):
+                        pnl += (entry_price * (self.target_profit / 100)) * self.total_lot * 50
+                        trade_placed = False
+                    elif tick['last_price'] > entry_price + (entry_price * (self.stop_loss / 100)):
+                        pnl -= (entry_price * (self.stop_loss / 100)) * self.total_lot * 50
+                        trade_placed = False
+
+        return pnl, trades

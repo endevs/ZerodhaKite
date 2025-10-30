@@ -24,6 +24,30 @@ app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # Needed for session management
 socketio = SocketIO(app)
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# Scheduler for automatic data collection
+def start_data_collection():
+    with app.app_context():
+        conn = get_db_connection()
+        conn.execute('UPDATE tick_data_status SET status = "Running"')
+        conn.commit()
+        conn.close()
+        logging.info("Started automatic data collection.")
+
+def stop_data_collection():
+    with app.app_context():
+        conn = get_db_connection()
+        conn.execute('UPDATE tick_data_status SET status = "Stopped"')
+        conn.commit()
+        conn.close()
+        logging.info("Stopped automatic data collection.")
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=start_data_collection, trigger="cron", day_of_week='mon-fri', hour=9, minute=15)
+scheduler.add_job(func=stop_data_collection, trigger="cron", day_of_week='mon-fri', hour=15, minute=30)
+scheduler.start()
+
 @app.before_request
 def make_session_permanent():
     session.permanent = False
@@ -130,7 +154,7 @@ def verify_otp():
                 session['user_id'] = user['id']
                 return redirect('/welcome')
         else:
-            return "Invalid OTP or OTP expired!"
+            return render_template('verify_otp.html', email=email, error='Invalid OTP or OTP expired!')
 
     return render_template('verify_otp.html', email=email)
 
@@ -175,7 +199,7 @@ def login():
 
             conn = get_db_connection()
             conn.execute('UPDATE users SET otp = ?, otp_expiry = ? WHERE id = ?',
-                         (otp, otp_expiry, user['id']))
+                         (otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), user['id']))
             conn.commit()
             conn.close()
 
@@ -545,6 +569,15 @@ def backtest_strategy():
 def connect(auth=None):
     global ticker
     if 'user_id' in session and 'access_token' in session:
+        try:
+            kite.set_access_token(session['access_token'])
+            kite.profile() # Validate the token
+        except Exception as e:
+            if "Invalid `api_key` or `access_token`" in str(e) or "Incorrect `api_key` or `access_token`" in str(e):
+                session.pop('access_token', None)
+                emit('unauthorized', {'message': 'Your Zerodha session has expired. Please log in again.'})
+                return
+
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
         conn.close()
@@ -559,13 +592,138 @@ def connect(auth=None):
 
         if ticker is None:
             # Pass strategy_name_input as the name parameter to Ticker
-            ticker = Ticker(user['app_key'], session['access_token'], list(running_strategies.values()), socketio)
+            ticker = Ticker(user['app_key'], session['access_token'], list(running_strategies.values()), socketio, kite) # Pass kite object
             ticker.start()
     emit('my_response', {'data': 'Connected'})
 
 @socketio.on('disconnect')
 def disconnect():
     logging.info('Client disconnected')
+
+from strategies.orb import ORB
+
+@app.route("/market_replay", methods=['POST'])
+def market_replay():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    strategy_name = request.form.get('strategy')
+    instrument_token = request.form.get('instrument')
+    from_date_str = request.form.get('from-date')
+    to_date_str = request.form.get('to-date')
+
+    from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d')
+    to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d')
+
+    conn = get_db_connection()
+    ticks_rows = conn.execute(
+        'SELECT * FROM tick_data WHERE instrument_token = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp',
+        (instrument_token, from_date, to_date)
+    ).fetchall()
+    conn.close()
+
+    if not ticks_rows:
+        return jsonify({'status': 'error', 'message': 'No data found for the selected criteria'}), 404
+
+    # Convert rows to list of dictionaries
+    ticks = [dict(row) for row in ticks_rows]
+
+    # Instantiate the strategy
+    # TODO: Get strategy parameters from the database or form
+    orb_strategy = ORB(
+        None, # No kite object needed for replay
+        'NIFTY', # Dummy value
+        '15', # Dummy value
+        '09:15', # Dummy value
+        '15:00', # Dummy value
+        1, # Dummy value
+        2, # Dummy value
+        1, # Dummy value
+        0.5, # Dummy value
+        'Option', # Dummy value
+        'Buy', # Dummy value
+        'ATM', # Dummy value
+        'Weekly', # Dummy value
+        'Replay_ORB'
+    )
+
+    pnl, trades = orb_strategy.replay(ticks)
+
+    return jsonify({'status': 'success', 'pnl': pnl, 'trades': trades})
+
+instruments_df = None
+
+@app.route("/tick_data_status")
+def tick_data_status():
+    global instruments_df
+    if 'user_id' not in session:
+        return jsonify([]), 401
+
+    if instruments_df is None:
+        try:
+            instruments_df = kite.instruments()
+        except Exception as e:
+            logging.error(f"Error fetching instruments: {e}")
+            return jsonify([]), 500
+
+    conn = get_db_connection()
+    status_rows = conn.execute('SELECT * FROM tick_data_status').fetchall()
+
+    status_data = []
+    for row in status_rows:
+        instrument_token = row['instrument_token']
+        status = row['status']
+
+        # Find trading symbol from the dataframe
+        instrument_details = next((item for item in instruments_df if item["instrument_token"] == instrument_token), None)
+        trading_symbol = instrument_details['tradingsymbol'] if instrument_details else f"Unknown ({instrument_token})"
+
+        row_count = conn.execute('SELECT COUNT(*) FROM tick_data WHERE instrument_token = ?', (instrument_token,)).fetchone()[0]
+        last_collected_at_row = conn.execute('SELECT MAX(timestamp) FROM tick_data WHERE instrument_token = ?', (instrument_token,)).fetchone()
+        last_collected_at = last_collected_at_row[0] if last_collected_at_row and last_collected_at_row[0] else 'N/A'
+
+        status_data.append({
+            'instrument': f"{trading_symbol} ({instrument_token})",
+            'status': status,
+            'row_count': row_count,
+            'last_collected_at': last_collected_at
+        })
+
+    conn.close()
+    return jsonify(status_data)
+
+@app.route("/tick_data/start", methods=['POST'])
+def start_tick_collection():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    conn = get_db_connection()
+    conn.execute('UPDATE tick_data_status SET status = \'Running\'')
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'success'})
+
+@app.route("/tick_data/pause", methods=['POST'])
+def pause_tick_collection():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    conn = get_db_connection()
+    conn.execute('UPDATE tick_data_status SET status = \'Paused\'')
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'success'})
+
+@app.route("/tick_data/stop", methods=['POST'])
+def stop_tick_collection():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    conn = get_db_connection()
+    conn.execute('UPDATE tick_data_status SET status = \'Stopped\'')
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'success'})
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, port=8000, allow_unsafe_werkzeug=True)

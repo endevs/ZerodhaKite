@@ -10,6 +10,12 @@
         <li class="nav-item">
             <a class="nav-link" href="#" id="backtest-tab">Backtest</a>
         </li>
+        <li class="nav-item">
+            <a class="nav-link" href="#" id="market-replay-tab">Market Replay</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="#" id="tick-data-tab">Tick Data</a>
+        </li>
     </ul>
     <ul class="navbar-nav ms-auto">
         <li class="nav-item">
@@ -343,32 +349,162 @@
         <div id="backtest-results" class="mt-4"></div>
     </div>
 
+    <div class="container mt-4" id="market-replay-content" style="display: none;">
+        <h2>Market Replay</h2>
+        <form id="market-replay-form">
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="replay-strategy" class="form-label">Strategy</label>
+                    <select class="form-select" id="replay-strategy" name="strategy">
+                        <option value="orb">Opening Range Breakout (ORB)</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="replay-instrument" class="form-label">Instrument Token</label>
+                    <input type="text" class="form-control" id="replay-instrument" name="instrument">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="replay-from-date" class="form-label">From Date</label>
+                    <input type="date" class="form-control" id="replay-from-date" name="from-date">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="replay-to-date" class="form-label">To Date</label>
+                    <input type="date" class="form-control" id="replay-to-date" name="to-date">
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Start Replay</button>
+        </form>
+        <div id="market-replay-results" class="mt-4"></div>
+    </div>
+
+    <div class="container mt-4" id="tick-data-content" style="display: none;">
+        <h2>Tick Data Collection Status</h2>
+        <div class="mb-3">
+            <button id="start-tick-collection" class="btn btn-success">Start</button>
+            <button id="pause-tick-collection" class="btn btn-warning">Pause</button>
+            <button id="stop-tick-collection" class="btn btn-danger">Stop</button>
+        </div>
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Instrument</th>
+                    <th>Status</th>
+                    <th>Row Count</th>
+                    <th>Last Collected At</th>
+                </tr>
+            </thead>
+            <tbody id="tick-data-status-table-body">
+            </tbody>
+        </table>
+    </div>
+
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', (event) => {
             const dashboardTab = document.getElementById('dashboard-tab');
             const backtestTab = document.getElementById('backtest-tab');
+            const marketReplayTab = document.getElementById('market-replay-tab');
+            const tickDataTab = document.getElementById('tick-data-tab');
             const dashboardContent = document.getElementById('dashboard-content');
             const backtestContent = document.getElementById('backtest-content');
+            const marketReplayContent = document.getElementById('market-replay-content');
+            const tickDataContent = document.getElementById('tick-data-content');
+            let tickDataInterval;
 
             dashboardTab.addEventListener('click', () => {
                 dashboardContent.style.display = 'block';
                 backtestContent.style.display = 'none';
+                marketReplayContent.style.display = 'none';
+                tickDataContent.style.display = 'none';
                 dashboardTab.classList.add('active');
                 backtestTab.classList.remove('active');
+                marketReplayTab.classList.remove('active');
+                tickDataTab.classList.remove('active');
+                clearInterval(tickDataInterval);
             });
 
             backtestTab.addEventListener('click', () => {
                 dashboardContent.style.display = 'none';
                 backtestContent.style.display = 'block';
+                marketReplayContent.style.display = 'none';
+                tickDataContent.style.display = 'none';
                 dashboardTab.classList.remove('active');
                 backtestTab.classList.add('active');
+                marketReplayTab.classList.remove('active');
+                tickDataTab.classList.remove('active');
+                clearInterval(tickDataInterval);
+            });
+
+            marketReplayTab.addEventListener('click', () => {
+                dashboardContent.style.display = 'none';
+                backtestContent.style.display = 'none';
+                marketReplayContent.style.display = 'block';
+                tickDataContent.style.display = 'none';
+                dashboardTab.classList.remove('active');
+                backtestTab.classList.remove('active');
+                marketReplayTab.classList.add('active');
+                tickDataTab.classList.remove('active');
+                clearInterval(tickDataInterval);
+            });
+
+            tickDataTab.addEventListener('click', () => {
+                dashboardContent.style.display = 'none';
+                backtestContent.style.display = 'none';
+                marketReplayContent.style.display = 'none';
+                tickDataContent.style.display = 'block';
+                dashboardTab.classList.remove('active');
+                backtestTab.classList.remove('active');
+                marketReplayTab.classList.remove('active');
+                tickDataTab.classList.add('active');
+                fetchTickDataStatus();
+                tickDataInterval = setInterval(fetchTickDataStatus, 5000); // Refresh every 5 seconds
+            });
+
+            function fetchTickDataStatus() {
+                fetch('/tick_data_status')
+                    .then(response => response.json())
+                    .then(data => {
+                        const tableBody = document.getElementById('tick-data-status-table-body');
+                        tableBody.innerHTML = '';
+                        data.forEach(item => {
+                            const row = document.createElement('tr');
+                            row.innerHTML = `
+                                <td>${item.instrument}</td>
+                                <td>${item.status}</td>
+                                <td>${item.row_count}</td>
+                                <td>${item.last_collected_at}</td>
+                            `;
+                            tableBody.appendChild(row);
+                        });
+                    });
+            }
+
+            document.getElementById('start-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/start', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
+            });
+
+            document.getElementById('pause-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/pause', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
+            });
+
+            document.getElementById('stop-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/stop', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
             });
 
             var socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 
             socket.on('connect', function() {
                 socket.emit('my_event', {data: 'I\'m connected!'});
+            });
+
+            socket.on('unauthorized', function(msg) {
+                alert(msg.message);
+                window.location.href = '/logout';
             });
 
             socket.on('market_data', function(msg) {
@@ -643,6 +779,21 @@
                         const resultsDiv = document.getElementById('backtest-results');
                         resultsDiv.innerHTML = `
                             <h5>Backtest Results</h5>
+                            <p>P&L: ${data.pnl}</p>
+                            <p>Number of Trades: ${data.trades}</p>
+                        `;
+                    });
+            });
+
+            document.getElementById('market-replay-form').addEventListener('submit', function(event) {
+                event.preventDefault();
+                const formData = new FormData(this);
+                fetch('/market_replay', { method: 'POST', body: formData })
+                    .then(response => response.json())
+                    .then(data => {
+                        const resultsDiv = document.getElementById('market-replay-results');
+                        resultsDiv.innerHTML = `
+                            <h5>Market Replay Results</h5>
                             <p>P&L: ${data.pnl}</p>
                             <p>Number of Trades: ${data.trades}</p>
                         `;

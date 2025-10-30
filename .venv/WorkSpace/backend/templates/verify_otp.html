@@ -8,6 +8,9 @@
             <div class="card mt-5">
                 <div class="card-body">
                     <h3 class="card-title text-center">Verify OTP</h3>
+                    {% if error %}
+                        <div class="alert alert-danger">{{ error }}</div>
+                    {% endif %}
                     <form action="/verify_otp" method="post">
                         <div class="form-group">
                             <label for="email">Email Address</label>
