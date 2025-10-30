@@ -465,20 +465,22 @@ def squareoff_strategy(strategy_id):
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
-    # Find the running strategy by its db_id
+    # Find the running strategy by its db_id in the in-memory dict and remove it
+    unique_run_id_to_del = None
     for unique_run_id, running_strat_info in running_strategies.items():
         if running_strat_info['db_id'] == strategy_id:
-            # Here you would implement logic to actually square off positions
-            # For now, we just change its in-memory status and remove it from running strategies
-            del running_strategies[unique_run_id]
+            unique_run_id_to_del = unique_run_id
+            break
+    
+    if unique_run_id_to_del:
+        del running_strategies[unique_run_id_to_del]
 
-            # Update status in DB
-            conn = get_db_connection()
-            conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('sq_off', strategy_id))
-            conn.commit()
-            conn.close()
-            return jsonify({'status': 'success', 'message': 'Strategy squared off successfully!'})
-    return jsonify({'status': 'error', 'message': 'Running strategy not found'}), 404
+    # Update status in DB
+    conn = get_db_connection()
+    conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('sq_off', strategy_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'success', 'message': 'Strategy squared off successfully!'})
 
 @app.route("/strategies")
 def get_strategies():
