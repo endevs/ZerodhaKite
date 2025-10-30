@@ -391,7 +391,7 @@ def deploy_strategy(strategy_id):
 
     # Check if strategy is already running
     for unique_run_id, running_strat_info in running_strategies.items():
-        if running_strat_info['db_id'] == strategy_id and running_strat_info['status'] == 'running':
+        if running_strat_info['db_id'] == strategy_id and running_strat_info['status'] == 'running' and strategy_data['status'] != 'sq_off':
             return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
 
     try:
