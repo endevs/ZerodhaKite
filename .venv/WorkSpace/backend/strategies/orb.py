@@ -18,13 +18,26 @@ class ORB(BaseStrategy):
         self.trade_placed = False
         self.trailing_stop_loss_price = 0
         self.paper_trade = paper_trade
+        self.position = 0  # 0: flat, 1: long, -1: short
+        self.entry_price = 0
+        self.exit_price = 0
+        self.trade_history = []
         self.status = {
             'state': 'initializing',
             'message': 'Strategy is initializing.',
             'opening_range_high': 0,
             'opening_range_low': 0,
             'current_price': 0,
-            'pnl': 0
+            'pnl': 0,
+            'paper_trade_mode': self.paper_trade,
+            'position': self.position,
+            'entry_price': self.entry_price,
+            'exit_price': self.exit_price,
+            'stop_loss_level': 0,
+            'target_profit_level': 0,
+            'traded_instrument': '',
+            'trade_history': self.trade_history,
+            'candle_time_frame': self.candle_time
         }
 
     def _get_instrument_token(self):
@@ -89,17 +102,27 @@ class ORB(BaseStrategy):
         return None
 
     def _place_order(self, ltp, option_type):
-        trading_symbol = self._get_atm_option_symbol(ltp, option_type)
-        if not trading_symbol:
+        instrument_token_to_trade = self._get_atm_option_symbol(ltp, option_type)
+        if not instrument_token_to_trade:
             logging.error(f"Could not find ATM option for {self.instrument} {option_type}")
             return
+
+        # Get trading symbol for logging
+        trading_symbol = ""
+        try:
+            instruments = self.kite.instruments('NFO')
+            instrument_details = next((item for item in instruments if item["instrument_token"] == instrument_token_to_trade), None)
+            trading_symbol = instrument_details['tradingsymbol'] if instrument_details else f"Unknown ({instrument_token_to_trade})"
+        except Exception as e:
+            logging.error(f"Error fetching instrument details for {instrument_token_to_trade}: {e}")
+            trading_symbol = f"Unknown ({instrument_token_to_trade})"
 
         transaction_type = self.kite.TRANSACTION_TYPE_BUY if self.trade_type == 'Buy' else self.kite.TRANSACTION_TYPE_SELL
         quantity = self.total_lot * 50 # Assuming 1 lot = 50 shares for NIFTY/BANKNIFTY
 
         if self.paper_trade:
             logging.info(f"[PAPER TRADE] Simulating order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
-            # Here you would update a simulated P&L or log the trade in a simulated account
+            self.status['traded_instrument'] = trading_symbol
         else:
             logging.info(f"Placing LIVE order for {trading_symbol} with quantity {quantity} ({self.total_lot} lots)")
             # self.kite.place_order(
@@ -118,62 +141,143 @@ class ORB(BaseStrategy):
         self.status['message'] = 'Strategy is running and waiting for ticks.'
 
     def process_ticks(self, ticks):
+        # Initialize status if not already set
         if self.status['state'] == 'initializing':
             self.status['state'] = 'waiting_for_opening_range'
             self.status['message'] = f"Waiting for the first {self.candle_time} minutes to form the opening range."
+            self.status['paper_trade_mode'] = self.paper_trade
+            self.status['candle_time_frame'] = self.candle_time
 
-        start_time = datetime.datetime.strptime(self.start_time, '%H:%M').time()
-        opening_range_end_time = (datetime.datetime.combine(datetime.date.today(), start_time) + datetime.timedelta(minutes=int(self.candle_time))).time()
+        start_time_obj = datetime.datetime.strptime(self.start_time, '%H:%M').time()
+        end_time_obj = datetime.datetime.strptime(self.end_time, '%H:%M').time()
+        opening_range_end_time_obj = (datetime.datetime.combine(datetime.date.today(), start_time_obj) + datetime.timedelta(minutes=int(self.candle_time))).time()
 
         for tick in ticks:
+            # Ensure we only process ticks for the strategy's instrument
             if tick['instrument_token'] != self.instrument_token:
                 continue
 
-            self.status['current_price'] = tick['last_price']
-
-            timestamp = None
+            # Extract timestamp safely
+            timestamp_val = None
             if 'timestamp' in tick:
-                timestamp = tick['timestamp']
+                timestamp_val = tick['timestamp']
             elif 'last_trade_time' in tick:
-                timestamp = tick['last_trade_time']
+                timestamp_val = tick['last_trade_time']
             elif 'exchange_timestamp' in tick:
-                timestamp = tick['exchange_timestamp']
-
-            if timestamp:
-                if isinstance(timestamp, datetime.datetime):
-                    tick_time = timestamp.time()
-                else:
-                    tick_time = datetime.datetime.fromtimestamp(timestamp).time()
-            else:
-                continue # Skip ticks without a timestamp
-
-            # Calculate opening range
-            if start_time <= tick_time < opening_range_end_time:
-                if self.status['opening_range_high'] == 0:
-                    self.status['opening_range_high'] = tick['last_price']
-                    self.status['opening_range_low'] = tick['last_price']
-                else:
-                    self.status['opening_range_high'] = max(self.status['opening_range_high'], tick['last_price'])
-                    self.status['opening_range_low'] = min(self.status['opening_range_low'], tick['last_price'])
-                self.status['message'] = f"Calculating opening range. High: {self.status['opening_range_high']}, Low: {self.status['opening_range_low']}"
-
-            # Monitor for breakout
-            elif tick_time >= opening_range_end_time and not self.trade_placed:
-                self.status['state'] = 'monitoring_for_breakout'
-                self.status['message'] = f"Monitoring for breakout. High: {self.status['opening_range_high']}, Low: {self.status['opening_range_low']}"
-                
-                if tick['last_price'] > self.status['opening_range_high']:
-                    self.trade_placed = True
-                    self.status['state'] = 'trade_placed'
-                    self.status['message'] = f"Long trade placed at {tick['last_price']}"
-                    self._place_order(tick['last_price'], 'CE')
-                elif tick['last_price'] < self.status['opening_range_low']:
-                    self.trade_placed = True
-                    self.status['state'] = 'trade_placed'
-                    self.status['message'] = f"Short trade placed at {tick['last_price']}"
-                    self._place_order(tick['last_price'], 'PE')
+                timestamp_val = tick['exchange_timestamp']
             
-            # TODO: Add logic for squaring off the position based on target/stop-loss
+            if not timestamp_val:
+                logging.warning(f"Skipping tick in process_ticks due to missing timestamp: {tick}")
+                continue
+
+            if isinstance(timestamp_val, datetime.datetime):
+                tick_datetime = timestamp_val
+            else:
+                tick_datetime = datetime.datetime.fromtimestamp(timestamp_val)
+            
+            tick_time = tick_datetime.time()
+            current_price = tick['last_price']
+            self.status['current_price'] = current_price
+
+            # Only process within trading hours
+            if not (start_time_obj <= tick_time <= end_time_obj):
+                self.status['message'] = f"Outside trading hours ({self.start_time}-{self.end_time}). Current time: {tick_time}"
+                continue
+
+            # --- Opening Range Calculation ---
+            if tick_time < opening_range_end_time_obj:
+                if self.status['opening_range_high'] == 0 or current_price > self.status['opening_range_high']:
+                    self.status['opening_range_high'] = current_price
+                if self.status['opening_range_low'] == 0 or current_price < self.status['opening_range_low']:
+                    self.status['opening_range_low'] = current_price
+                self.status['state'] = 'waiting_for_opening_range'
+                self.status['message'] = f"Calculating opening range ({self.candle_time} min). High: {self.status['opening_range_high']:.2f}, Low: {self.status['opening_range_low']:.2f}"
+                continue # Continue to next tick if still in opening range
+
+            # --- Trade Execution Logic ---
+            if not self.trade_placed:
+                self.status['state'] = 'monitoring_for_breakout'
+                self.status['message'] = f"Monitoring for breakout. OR High: {self.status['opening_range_high']:.2f}, OR Low: {self.status['opening_range_low']:.2f}. Current: {current_price:.2f}"
+
+                if current_price > self.status['opening_range_high']:
+                    self.position = 1  # Long position
+                    self.entry_price = current_price
+                    self.trade_placed = True
+                    self.status['state'] = 'position_open'
+                    self.status['message'] = f"Long trade initiated at {self.entry_price:.2f} (Breakout above OR High)"
+                    self.status['position'] = self.position
+                    self.status['entry_price'] = self.entry_price
+                    self.status['stop_loss_level'] = self.entry_price * (1 - self.stop_loss / 100)
+                    self.status['target_profit_level'] = self.entry_price * (1 + self.target_profit / 100)
+                    self.status['traded_instrument'] = self._get_atm_option_symbol(current_price, 'CE') # Assuming CE for long
+                    self.trade_history.append({
+                        'time': tick_datetime.strftime('%H:%M:%S'),
+                        'action': 'BUY',
+                        'price': self.entry_price,
+                        'instrument': self.status['traded_instrument'],
+                        'order_id': str(uuid.uuid4())[:8] # Dummy order ID
+                    })
+                    logging.info(self.status['message'])
+                    # self._place_order(current_price, 'CE') # Actual order placement
+                elif current_price < self.status['opening_range_low']:
+                    self.position = -1  # Short position
+                    self.entry_price = current_price
+                    self.trade_placed = True
+                    self.status['state'] = 'position_open'
+                    self.status['message'] = f"Short trade initiated at {self.entry_price:.2f} (Breakout below OR Low)"
+                    self.status['position'] = self.position
+                    self.status['entry_price'] = self.entry_price
+                    self.status['stop_loss_level'] = self.entry_price * (1 + self.stop_loss / 100)
+                    self.status['target_profit_level'] = self.entry_price * (1 - self.target_profit / 100)
+                    self.status['traded_instrument'] = self._get_atm_option_symbol(current_price, 'PE') # Assuming PE for short
+                    self.trade_history.append({
+                        'time': tick_datetime.strftime('%H:%M:%S'),
+                        'action': 'SELL',
+                        'price': self.entry_price,
+                        'instrument': self.status['traded_instrument'],
+                        'order_id': str(uuid.uuid4())[:8] # Dummy order ID
+                    })
+                    logging.info(self.status['message'])
+                    # self._place_order(current_price, 'PE') # Actual order placement
+            
+            # --- Position Management (SL/Target) ---
+            elif self.position != 0: # If a position is open
+                current_pnl = (current_price - self.entry_price) * self.total_lot * 50 * self.position
+                self.status['pnl'] = current_pnl
+                self.status['message'] = f"Position open. Entry: {self.entry_price:.2f}, Current: {current_price:.2f}, P&L: {current_pnl:.2f}"
+
+                # Check for Stop Loss
+                if (self.position == 1 and current_price <= self.status['stop_loss_level']) or \
+                   (self.position == -1 and current_price >= self.status['stop_loss_level']):
+                    self.exit_price = current_price
+                    self.status['state'] = 'position_closed'
+                    self.status['message'] = f"Position closed by Stop Loss at {self.exit_price:.2f}. P&L: {current_pnl:.2f}"
+                    self.trade_history.append({
+                        'time': tick_datetime.strftime('%H:%M:%S'),
+                        'action': 'SELL_SL' if self.position == 1 else 'BUY_SL',
+                        'price': self.exit_price,
+                        'instrument': self.status['traded_instrument'],
+                        'order_id': str(uuid.uuid4())[:8] # Dummy order ID
+                    })
+                    self.position = 0
+                    self.trade_placed = False
+                    logging.info(self.status['message'])
+                # Check for Target Profit
+                elif (self.position == 1 and current_price >= self.status['target_profit_level']) or \
+                     (self.position == -1 and current_price <= self.status['target_profit_level']):
+                    self.exit_price = current_price
+                    self.status['state'] = 'position_closed'
+                    self.status['message'] = f"Position closed by Target Profit at {self.exit_price:.2f}. P&L: {current_pnl:.2f}"
+                    self.trade_history.append({
+                        'time': tick_datetime.strftime('%H:%M:%S'),
+                        'action': 'SELL_TP' if self.position == 1 else 'BUY_TP',
+                        'price': self.exit_price,
+                        'instrument': self.status['traded_instrument'],
+                        'order_id': str(uuid.uuid4())[:8] # Dummy order ID
+                    })
+                    self.position = 0
+                    self.trade_placed = False
+                    logging.info(self.status['message'])
 
     def backtest(self, from_date, to_date):
         logging.info(f"Running backtest for {self.instrument} from {from_date} to {to_date}")

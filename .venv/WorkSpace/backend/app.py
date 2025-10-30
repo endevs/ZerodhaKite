@@ -655,6 +655,18 @@ def market_replay():
 
 instruments_df = None
 
+@app.route("/tick_data/<instrument_token>")
+def tick_data(instrument_token):
+    if 'user_id' not in session:
+        return jsonify([]), 401
+
+    conn = get_db_connection()
+    tick_data_rows = conn.execute('SELECT * FROM tick_data WHERE instrument_token = ? ORDER BY timestamp DESC LIMIT 100', (instrument_token,)).fetchall()
+    conn.close()
+
+    tick_data = [dict(row) for row in tick_data_rows]
+    return jsonify(tick_data)
+
 @app.route("/tick_data_status")
 def tick_data_status():
     global instruments_df
@@ -685,7 +697,8 @@ def tick_data_status():
         last_collected_at = last_collected_at_row[0] if last_collected_at_row and last_collected_at_row[0] else 'N/A'
 
         status_data.append({
-            'instrument': f"{trading_symbol} ({instrument_token})",
+            'instrument': trading_symbol,
+            'instrument_token': instrument_token,
             'status': status,
             'row_count': row_count,
             'last_collected_at': last_collected_at
