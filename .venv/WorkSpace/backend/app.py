@@ -623,15 +623,33 @@ def market_replay():
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
-    strategy_name = request.form.get('strategy')
-    instrument_token = request.form.get('instrument')
+    strategy_id = request.form.get('strategy')
+    instrument_name = request.form.get('instrument')
     from_date_str = request.form.get('from-date')
     to_date_str = request.form.get('to-date')
 
     from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d')
     to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d')
 
+    global instruments_df
+    if instruments_df is None:
+        try:
+            instruments_df = kite.instruments()
+        except Exception as e:
+            logging.error(f"Error fetching instruments: {e}")
+            return jsonify({'status': 'error', 'message': 'Could not fetch instruments'}), 500
+
+    instrument = next((item for item in instruments_df if item["name"] == instrument_name and item["exchange"] == "NFO"), None)
+    if not instrument:
+        return jsonify({'status': 'error', 'message': f'Instrument {instrument_name} not found'}), 404
+    instrument_token = instrument['instrument_token']
+
     conn = get_db_connection()
+    strategy_data = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id'])).fetchone()
+
+    if not strategy_data:
+        return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+
     ticks_rows = conn.execute(
         'SELECT * FROM tick_data WHERE instrument_token = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp',
         (instrument_token, from_date, to_date)
@@ -641,29 +659,35 @@ def market_replay():
     if not ticks_rows:
         return jsonify({'status': 'error', 'message': 'No data found for the selected criteria'}), 404
 
-    # Convert rows to list of dictionaries
     ticks = [dict(row) for row in ticks_rows]
 
-    # Instantiate the strategy
-    # TODO: Get strategy parameters from the database or form
-    orb_strategy = ORB(
+    strategy_type = strategy_data['strategy_type']
+    strategy_class = None
+    if strategy_type == 'orb':
+        strategy_class = ORB
+    elif strategy_type == 'capture_mountain_signal':
+        strategy_class = CaptureMountainSignal
+    else:
+        return jsonify({'status': 'error', 'message': 'Unknown strategy'}), 400
+
+    strategy = strategy_class(
         None, # No kite object needed for replay
-        'NIFTY', # Dummy value
-        '15', # Dummy value
-        '09:15', # Dummy value
-        '15:00', # Dummy value
-        1, # Dummy value
-        2, # Dummy value
-        1, # Dummy value
-        0.5, # Dummy value
-        'Option', # Dummy value
-        'Buy', # Dummy value
-        'ATM', # Dummy value
-        'Weekly', # Dummy value
-        'Replay_ORB'
+        strategy_data['instrument'],
+        strategy_data['candle_time'],
+        strategy_data['start_time'],
+        strategy_data['end_time'],
+        strategy_data['stop_loss'],
+        strategy_data['target_profit'],
+        strategy_data['total_lot'],
+        strategy_data['trailing_stop_loss'],
+        strategy_data['segment'],
+        strategy_data['trade_type'],
+        strategy_data['strike_price'],
+        strategy_data['expiry_type'],
+        strategy_data['strategy_name']
     )
 
-    pnl, trades = orb_strategy.replay(ticks)
+    pnl, trades = strategy.replay(ticks)
 
     return jsonify({'status': 'success', 'pnl': pnl, 'trades': trades})
 

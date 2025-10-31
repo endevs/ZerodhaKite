@@ -366,12 +366,20 @@
                 <div class="col-md-6 mb-3">
                     <label for="replay-strategy" class="form-label">Strategy</label>
                     <select class="form-select" id="replay-strategy" name="strategy">
-                        <option value="orb">Opening Range Breakout (ORB)</option>
+                        <option value="" disabled selected>Select Strategy</option>
+                        {% for strategy in strategies %}
+                            <option value="{{ strategy.id }}">{{ strategy.strategy_name }}</option>
+                        {% endfor %}
                     </select>
+                    <div id="replay-strategy-description" class="alert alert-info mt-2" style="display: none;"></div>
+                    <div id="replay-strategy-details" class="mt-2"></div>
                 </div>
                 <div class="col-md-6 mb-3">
-                    <label for="replay-instrument" class="form-label">Instrument Token</label>
-                    <input type="text" class="form-control" id="replay-instrument" name="instrument">
+                    <label for="replay-instrument" class="form-label">Instrument</label>
+                    <select class="form-select" id="replay-instrument" name="instrument">
+                        <option value="NIFTY">NIFTY</option>
+                        <option value="BANKNIFTY">BANKNIFTY</option>
+                    </select>
                 </div>
             </div>
             <div class="row">
@@ -812,7 +820,7 @@
                             document.getElementById('expiry-type').value = strategy.expiry_type;
                             
                             const strategySelect = document.getElementById('strategy-select');
-                            strategySelect.value = strategy.strategy;
+                            strategySelect.value = strategy.strategy_type;
                             updateStrategyView();
 
                             const collapseOne = new bootstrap.Collapse(document.getElementById('collapseOne'), { toggle: false });
@@ -965,6 +973,41 @@
                     });
             });
 
+            document.getElementById('replay-strategy').addEventListener('change', function() {
+                const strategyId = this.value;
+                const descriptionDiv = document.getElementById('replay-strategy-description');
+                const detailsDiv = document.getElementById('replay-strategy-details');
+
+                if (strategyId) {
+                    fetch(`/strategy/edit/${strategyId}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                const strategy = data.strategy;
+                                const strategyType = strategy.strategy_type;
+
+                                if (strategyDescriptions[strategyType]) {
+                                    descriptionDiv.innerHTML = strategyDescriptions[strategyType];
+                                    descriptionDiv.style.display = 'block';
+                                } else {
+                                    descriptionDiv.style.display = 'none';
+                                }
+
+                                let detailsHtml = '<h5>Strategy Details</h5>';
+                                for (const [key, value] of Object.entries(strategy)) {
+                                    detailsHtml += `<p><strong>${key}:</strong> ${value}</p>`;
+                                }
+                                detailsDiv.innerHTML = detailsHtml;
+                            } else {
+                                descriptionDiv.style.display = 'none';
+                                detailsDiv.innerHTML = '<p>Could not fetch strategy details.</p>';
+                            }
+                        });
+                } else {
+                    descriptionDiv.style.display = 'none';
+                    detailsDiv.innerHTML = '';
+                }
+            });
         });
     </script>
 {% endblock %}

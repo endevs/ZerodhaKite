@@ -2,3 +2,4 @@ Flask
 kiteconnect
 Flask-SocketIO
 APScheduler
+flask-cors
