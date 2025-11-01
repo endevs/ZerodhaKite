@@ -24,7 +24,7 @@
                 <img src="{{ url_for('static', filename='drp-infotech-logo.png') }}" alt="DRP Infotech Logo">
                 {% block navbar_brand_text %}{% endblock %}
             </a>
-            {% block navbar_content %}{% endblock %}
+            {% include '_navbar.html' %}
         </div>
     </nav>
     <div class="container">

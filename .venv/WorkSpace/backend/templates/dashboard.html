@@ -2,34 +2,6 @@
 
 {% block title %}Trading Dashboard{% endblock %}
 
-{% block navbar_content %}
-    <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-        <li class="nav-item">
-            <a class="nav-link active" aria-current="page" href="#" id="dashboard-tab">Dashboard</a>
-        </li>
-        <li class="nav-item">
-            <a class="nav-link" href="#" id="backtest-tab">Backtest</a>
-        </li>
-        <li class="nav-item">
-            <a class="nav-link" href="#" id="market-replay-tab">Market Replay</a>
-        </li>
-        <li class="nav-item">
-            <a class="nav-link" href="#" id="tick-data-tab">Tick Data</a>
-        </li>
-        <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('chat.chat') }}" id="chat-tab">Chat</a>
-        </li>
-    </ul>
-    <ul class="navbar-nav ms-auto">
-        <li class="nav-item">
-            <a class="nav-link" href="#">Welcome, <span id="user-name">{{ user_name }}</span></a>
-        </li>
-        <li class="nav-item">
-            <a class="nav-link" href="/logout">Logout</a>
-        </li>
-    </ul>
-{% endblock %}
-
 {% block content %}
     <div class="container mt-4" id="dashboard-content">
         <div class="row">
@@ -528,54 +500,72 @@
             const tickDataContent = document.getElementById('tick-data-content');
             let tickDataInterval;
 
-            dashboardTab.addEventListener('click', () => {
-                dashboardContent.style.display = 'block';
-                backtestContent.style.display = 'none';
-                marketReplayContent.style.display = 'none';
-                tickDataContent.style.display = 'none';
-                dashboardTab.classList.add('active');
-                backtestTab.classList.remove('active');
-                marketReplayTab.classList.remove('active');
-                tickDataTab.classList.remove('active');
-                clearInterval(tickDataInterval);
-            });
-
-            backtestTab.addEventListener('click', () => {
-                dashboardContent.style.display = 'none';
-                backtestContent.style.display = 'block';
-                marketReplayContent.style.display = 'none';
-                tickDataContent.style.display = 'none';
-                dashboardTab.classList.remove('active');
-                backtestTab.classList.add('active');
-                marketReplayTab.classList.remove('active');
-                tickDataTab.classList.remove('active');
-                clearInterval(tickDataInterval);
-            });
-
-            marketReplayTab.addEventListener('click', () => {
-                dashboardContent.style.display = 'none';
-                backtestContent.style.display = 'none';
-                marketReplayContent.style.display = 'block';
-                tickDataContent.style.display = 'none';
-                dashboardTab.classList.remove('active');
-                backtestTab.classList.remove('active');
-                marketReplayTab.classList.add('active');
-                tickDataTab.classList.remove('active');
-                clearInterval(tickDataInterval);
-            });
-
-            tickDataTab.addEventListener('click', () => {
+            function showContent(contentId) {
+                // Hide all content sections
                 dashboardContent.style.display = 'none';
                 backtestContent.style.display = 'none';
                 marketReplayContent.style.display = 'none';
-                tickDataContent.style.display = 'block';
+                tickDataContent.style.display = 'none';
+
+                // Remove active class from all tabs
                 dashboardTab.classList.remove('active');
                 backtestTab.classList.remove('active');
                 marketReplayTab.classList.remove('active');
-                tickDataTab.classList.add('active');
-                fetchTickDataStatus();
-                tickDataInterval = setInterval(fetchTickDataStatus, 5000); // Refresh every 5 seconds
+                tickDataTab.classList.remove('active');
+
+                // Clear any existing tick data interval
+                clearInterval(tickDataInterval);
+
+                // Show the selected content and add active class to its tab
+                if (contentId === 'dashboard-content') {
+                    dashboardContent.style.display = 'block';
+                    dashboardTab.classList.add('active');
+                } else if (contentId === 'backtest-content') {
+                    backtestContent.style.display = 'block';
+                    backtestTab.classList.add('active');
+                } else if (contentId === 'market-replay-content') {
+                    marketReplayContent.style.display = 'block';
+                    marketReplayTab.classList.add('active');
+                } else if (contentId === 'tick-data-content') {
+                    tickDataContent.style.display = 'block';
+                    tickDataTab.classList.add('active');
+                    fetchTickDataStatus();
+                    tickDataInterval = setInterval(fetchTickDataStatus, 5000); // Refresh every 5 seconds
+                }
+            }
+
+            // Event listeners for navigation tabs
+            dashboardTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('dashboard-content');
+                history.pushState(null, '', '#dashboard-content');
             });
+
+            backtestTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('backtest-content');
+                history.pushState(null, '', '#backtest-content');
+            });
+
+            marketReplayTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('market-replay-content');
+                history.pushState(null, '', '#market-replay-content');
+            });
+
+            tickDataTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('tick-data-content');
+                history.pushState(null, '', '#tick-data-content');
+            });
+
+            // Handle initial load based on URL hash
+            const initialHash = window.location.hash;
+            if (initialHash) {
+                showContent(initialHash.substring(1)); // Remove '#' from hash
+            } else {
+                showContent('dashboard-content'); // Default to dashboard
+            }
 
             function fetchTickDataStatus() {
                 fetch('/tick_data_status')
