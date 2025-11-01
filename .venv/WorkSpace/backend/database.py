@@ -74,6 +74,29 @@ def create_tables():
             status TEXT NOT NULL DEFAULT 'Stopped'
         )
     ''')
+    conn.execute('DROP TABLE IF EXISTS simulated_market_data')
+    conn.execute('''
+        CREATE TABLE simulated_market_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_token INTEGER NOT NULL,
+            timestamp DATETIME NOT NULL,
+            last_price REAL NOT NULL
+        )
+    ''')
+    conn.execute('DROP TABLE IF EXISTS five_minute_candles')
+    conn.execute('''
+        CREATE TABLE five_minute_candles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_token INTEGER NOT NULL,
+            timestamp DATETIME NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume INTEGER NOT NULL,
+            ema REAL
+        )
+    ''')
     conn.commit()
     conn.close()
 

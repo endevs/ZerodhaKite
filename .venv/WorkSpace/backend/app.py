@@ -17,6 +17,7 @@ import datetime
 import secrets
 import config
 from database import get_db_connection
+from chat import chat_bp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +99,10 @@ def send_email(to_email, otp):
     with smtplib.SMTP_SSL(smtp_server, port, context=context) as server:
         server.login(sender_email, password)
         server.sendmail(sender_email, receiver_email, message.as_string())
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
 
 @app.route("/")
 def index():
@@ -793,6 +798,8 @@ def strategy_status(strategy_id):
             return jsonify(status_data)
     
     return jsonify({'status': 'error', 'message': 'Strategy not running'}), 404
+
+app.register_blueprint(chat_bp)
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, port=8000, allow_unsafe_werkzeug=True)
