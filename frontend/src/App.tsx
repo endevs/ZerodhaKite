@@ -1,6 +1,5 @@
 import React from 'react';
 import { Navigate } from 'react-router-dom';
-import Layout from './components/Layout';
 import './App.css';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
