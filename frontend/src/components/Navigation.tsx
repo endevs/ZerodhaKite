@@ -18,8 +18,31 @@ const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, userNam
   return (
     <nav className="navbar navbar-expand-lg navbar-dark bg-dark shadow-sm">
       <div className="container-fluid">
-        <a className="navbar-brand d-flex align-items-center" href="/">
-          <span className="fs-4 fw-bold text-primary">ZerodhaKite</span>
+        <a 
+          className="navbar-brand d-flex align-items-center" 
+          href="https://drpinfotech.com" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          style={{ paddingTop: '0.5rem', paddingBottom: '0.5rem' }}
+        >
+          <img 
+            src="/drp-infotech-logo.png" 
+            alt="DRP Infotech Pvt Ltd Logo" 
+            style={{ 
+              height: '45px', 
+              width: 'auto',
+              marginRight: '10px',
+              objectFit: 'contain'
+            }}
+            onError={(e) => {
+              // Fallback to text if image fails to load
+              e.currentTarget.style.display = 'none';
+              const fallback = document.createElement('span');
+              fallback.className = 'fs-5 fw-bold text-light';
+              fallback.textContent = 'DRP Infotech Pvt Ltd';
+              e.currentTarget.parentElement?.appendChild(fallback);
+            }}
+          />
         </a>
         <button
           className="navbar-toggler"

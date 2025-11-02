@@ -23,3 +23,6 @@ DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
 # CORS Configuration
 CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')]
+
+# Frontend URL Configuration
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')

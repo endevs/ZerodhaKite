@@ -629,15 +629,17 @@ const RunningStrategies: React.FC = () => {
     // Fetch running strategies from API
     const fetchRunningStrategies = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/running-strategies', { credentials: 'include' }); // Assuming an API endpoint for running strategies
+        const response = await fetch('http://localhost:8000/api/running-strategies', { credentials: 'include' });
         const data = await response.json();
-        if (response.ok) {
-          setRunningStrategies(data.strategies);
+        if (response.ok && data.status === 'success') {
+          setRunningStrategies(data.strategies || []);
         } else {
           console.error('Error fetching running strategies:', data.message);
+          setRunningStrategies([]);
         }
       } catch (error) {
         console.error('Error fetching running strategies:', error);
+        setRunningStrategies([]);
       }
     };
     fetchRunningStrategies();
@@ -668,9 +670,13 @@ const RunningStrategies: React.FC = () => {
               runningStrategies.map((strategy) => (
                 <tr key={strategy.id}>
                   <td>{strategy.id}</td>
-                  <td>{strategy.strategy_name}</td>
+                  <td>{strategy.strategy_name || strategy.name}</td>
                   <td>{strategy.instrument}</td>
-                  <td>{strategy.status}</td>
+                  <td>
+                    <span className={`badge ${strategy.status === 'running' ? 'bg-success' : 'bg-secondary'}`}>
+                      {strategy.status}
+                    </span>
+                  </td>
                   <td>
                     {/* Add actions for running strategies if any */}
                   </td>

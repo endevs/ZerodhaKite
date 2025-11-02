@@ -19,6 +19,7 @@ import secrets
 import config
 from database import get_db_connection
 from chat import chat_bp
+from utils.backtest_metrics import calculate_all_metrics
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -85,20 +86,50 @@ def send_email(to_email, otp):
     password = config.PASSWORD_EMAIL
 
     message = MIMEMultipart("alternative")
-    message["Subject"] = "Your OTP for Login"
-    message["From"] = sender_email
+    message["Subject"] = "Your OTP for DRP Infotech Trading Platform"
+    message["From"] = f"DRP Infotech Pvt Ltd <{sender_email}>"
     message["To"] = receiver_email
 
     text = f"""
+    DRP Infotech Pvt Ltd - Algorithmic Trading Platform
+    
     Hi,
-    Your OTP is {otp}
+    Your OTP for login is: {otp}
+    
+    This OTP is valid for 10 minutes.
+    
+    If you didn't request this OTP, please ignore this email.
+    
+    Best regards,
+    DRP Infotech Pvt Ltd
+    Email: contact@drpinfotech.com
+    Website: drpinfotech.com
     """
     html = f"""
     <html>
-        <body>
-            <p>Hi,<br>
-               Your OTP is <strong>{otp}</strong>
-            </p>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="background-color: #0d6efd; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0;">
+                    <h2 style="margin: 0;">DRP Infotech Pvt Ltd</h2>
+                    <p style="margin: 5px 0 0 0; font-size: 14px;">Algorithmic Trading Platform</p>
+                </div>
+                <div style="background-color: #f8f9fa; padding: 30px; border-radius: 0 0 5px 5px;">
+                    <h3 style="color: #0d6efd; margin-top: 0;">OTP Verification</h3>
+                    <p>Hi,</p>
+                    <p>Your OTP for login is:</p>
+                    <div style="background-color: white; padding: 20px; text-align: center; border: 2px dashed #0d6efd; border-radius: 5px; margin: 20px 0;">
+                        <h1 style="color: #0d6efd; margin: 0; font-size: 32px; letter-spacing: 5px;">{otp}</h1>
+                    </div>
+                    <p style="color: #666; font-size: 14px;">This OTP is valid for <strong>10 minutes</strong>.</p>
+                    <p style="color: #666; font-size: 14px;">If you didn't request this OTP, please ignore this email.</p>
+                    <hr style="border: none; border-top: 1px solid #dee2e6; margin: 30px 0;">
+                    <div style="text-align: center; color: #666; font-size: 12px;">
+                        <p style="margin: 5px 0;"><strong>DRP Infotech Pvt Ltd</strong></p>
+                        <p style="margin: 5px 0;">Email: <a href="mailto:contact@drpinfotech.com" style="color: #0d6efd; text-decoration: none;">contact@drpinfotech.com</a></p>
+                        <p style="margin: 5px 0;">Website: <a href="https://drpinfotech.com" style="color: #0d6efd; text-decoration: none;">drpinfotech.com</a></p>
+                    </div>
+                </div>
+            </div>
         </body>
     </html>
     """
@@ -121,7 +152,7 @@ def favicon():
 @app.route("/")
 def index():
     if 'user_id' in session:
-        return redirect("/dashboard")
+        return redirect(f"{config.FRONTEND_URL}/dashboard")
     return render_template("login.html")
 
 @app.route('/signup', methods=['GET', 'POST'])
@@ -266,7 +297,7 @@ def api_verify_otp():
                 return jsonify({
                     'status': 'success',
                     'message': 'Registration successful! Please log in.',
-                    'redirect': '/login'
+                    'redirect': '/login'  # Relative path for React Router
                 })
             else:
                 # Already verified - login
@@ -275,7 +306,7 @@ def api_verify_otp():
                 return jsonify({
                     'status': 'success',
                     'message': 'OTP verified successfully!',
-                    'redirect': '/welcome'
+                    'redirect': '/welcome'  # Relative path for React Router
                 })
         else:
             conn.close()
@@ -336,10 +367,10 @@ def login():
             conn.close()
 
             send_email(email, otp)
-            return redirect(f'/verify_otp?email={email}')
+            return redirect(f'{config.FRONTEND_URL}/verify-otp?email={email}')
         else:
             flash('User not found. Please sign up.', 'error')
-            return redirect('/signup')
+            return redirect(f'{config.FRONTEND_URL}/signup')
 
     return render_template("login.html")
 
@@ -374,7 +405,7 @@ def api_login():
             return jsonify({
                 'status': 'success',
                 'message': 'OTP sent successfully! Please check your email.',
-                'redirect': '/verify-otp'
+                'redirect': '/verify-otp'  # Relative path for React Router
             })
         else:
             return jsonify({
@@ -429,7 +460,7 @@ def callback():
         data = kite.generate_session(request_token, api_secret=user['app_secret'])
         session['access_token'] = data["access_token"]
         kite.set_access_token(data["access_token"])
-        return redirect("/dashboard")
+        return redirect(f"{config.FRONTEND_URL}/dashboard")
     except Exception as e:
         logging.error(f"Error generating session: {e}")
         return "Error generating session", 500
@@ -484,12 +515,20 @@ def api_logout():
 @app.route("/api/user-data")
 def api_user_data():
     if 'user_id' not in session:
-        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+        return jsonify({
+            'status': 'error', 
+            'message': 'User not logged in',
+            'authenticated': False,
+            'user_id': None
+        }), 401
     
     try:
+        user_id = session['user_id']
         if 'access_token' not in session:
             return jsonify({
                 'status': 'success',
+                'authenticated': True,
+                'user_id': user_id,
                 'user_name': 'Guest',
                 'balance': 0,
                 'access_token_present': False
@@ -503,6 +542,8 @@ def api_user_data():
         
         return jsonify({
             'status': 'success',
+            'authenticated': True,
+            'user_id': user_id,
             'user_name': user_name,
             'balance': balance,
             'access_token_present': True
@@ -513,6 +554,8 @@ def api_user_data():
             session.pop('access_token', None)
             return jsonify({
                 'status': 'success',
+                'authenticated': True,
+                'user_id': session.get('user_id'),
                 'user_name': 'Guest',
                 'balance': 0,
                 'access_token_present': False,
@@ -520,6 +563,8 @@ def api_user_data():
             })
         return jsonify({
             'status': 'success',
+            'authenticated': True,
+            'user_id': session.get('user_id'),
             'user_name': 'Guest',
             'balance': 0,
             'access_token_present': False
@@ -769,6 +814,24 @@ def api_get_strategies():
     strategies_list = [dict(s) for s in strategies]
     return jsonify({'status': 'success', 'strategies': strategies_list})
 
+@app.route("/api/running-strategies")
+def api_get_running_strategies():
+    """Get currently running strategies"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    # Get running strategies from database
+    conn = get_db_connection()
+    running_strategies = conn.execute(
+        'SELECT * FROM strategies WHERE user_id = ? AND status = ?', 
+        (session['user_id'], 'running')
+    ).fetchall()
+    conn.close()
+
+    # Convert to list of dictionaries
+    strategies_list = [dict(s) for s in running_strategies]
+    return jsonify({'status': 'success', 'strategies': strategies_list})
+
 @app.route("/strategy/cancel/<strategy_id>")
 def cancel_strategy(strategy_id):
     if strategy_id in running_strategies:
@@ -824,7 +887,21 @@ def backtest_strategy():
 
         pnl, trades = orb_strategy.backtest(from_date, to_date)
 
-        return jsonify({'status': 'success', 'pnl': pnl, 'trades': trades})
+        # Enhanced metrics calculation
+        # Convert trades to format expected by metrics calculator
+        trade_list = [{'pnl': pnl / trades if trades > 0 else 0, 'date': from_date} for _ in range(trades)]
+        
+        # Calculate comprehensive metrics
+        metrics = calculate_all_metrics(trade_list, initial_capital=100000)
+        metrics['simple_pnl'] = pnl
+        metrics['simple_trades'] = trades
+
+        return jsonify({
+            'status': 'success',
+            'pnl': pnl,
+            'trades': trades,
+            'metrics': metrics
+        })
     except Exception as e:
         logging.error(f"Error during backtest: {e}")
         return jsonify({'status': 'error', 'message': f'Error during backtest: {e}'}), 500

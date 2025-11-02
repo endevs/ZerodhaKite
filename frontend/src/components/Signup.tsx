@@ -44,6 +44,32 @@ const Signup: React.FC = () => {
 
   return (
     <Layout>
+      <div className="position-absolute top-0 start-0 m-3" style={{ zIndex: 1000 }}>
+        <a 
+          href="https://drpinfotech.com" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="text-decoration-none"
+        >
+          <img 
+            src="/drp-infotech-logo.png" 
+            alt="DRP Infotech Pvt Ltd Logo" 
+            style={{ 
+              height: '50px', 
+              width: 'auto',
+              objectFit: 'contain'
+            }}
+            onError={(e) => {
+              // Fallback to text if image fails to load
+              e.currentTarget.style.display = 'none';
+              const fallback = document.createElement('span');
+              fallback.className = 'fs-5 fw-bold text-dark';
+              fallback.textContent = 'DRP Infotech Pvt Ltd';
+              e.currentTarget.parentElement?.appendChild(fallback);
+            }}
+          />
+        </a>
+      </div>
       <div className="row justify-content-center">
         <div className="col-md-6">
           <div className="card mt-5">
