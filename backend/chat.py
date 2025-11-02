@@ -8,10 +8,19 @@ chat_bp = Blueprint('chat', __name__)
 
 @chat_bp.route('/chat')
 def chat():
+    from flask import session, redirect
+    # Check if user is authenticated
+    if 'user_id' not in session:
+        return redirect('/login')
     return render_template('chat.html')
 
 @chat_bp.route('/api/chart_data')
 def chart_data():
+    from flask import session
+    # Check authentication
+    if 'user_id' not in session:
+        return jsonify({'error': 'User not authenticated'}), 401
+    
     date_str = request.args.get('date')
     if not date_str:
         return jsonify({'candles': [], 'ema': []})

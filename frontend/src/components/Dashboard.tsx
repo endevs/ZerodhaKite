@@ -6,6 +6,7 @@ import DashboardContent from './DashboardContent';
 import BacktestContent from './BacktestContent';
 import MarketReplayContent from './MarketReplayContent';
 import TickDataContent from './TickDataContent';
+import ChartContent from './ChartContent';
 import ChartModal from './ChartModal';
 import LiveStrategyModal from './LiveStrategyModal';
 
@@ -119,6 +120,8 @@ const Dashboard: React.FC = () => {
         return <MarketReplayContent />;
       case 'tick-data':
         return <TickDataContent onViewChart={handleViewChart} />;
+      case 'chat':
+        return <ChartContent />;
       default:
         return (
           <DashboardContent
