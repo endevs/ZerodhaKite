@@ -38,8 +38,8 @@ socketio_cors_origins = config.CORS_ORIGINS + ['http://localhost:8000', 'http://
 socketio = SocketIO(app, 
                     cors_allowed_origins=socketio_cors_origins,
                     async_mode='threading',
-                    logger=True,
-                    engineio_logger=True)
+                    logger=False,  # Disable SocketIO verbose logging to reduce noise
+                    engineio_logger=False)  # Disable EngineIO verbose logging to reduce noise
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
