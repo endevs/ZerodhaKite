@@ -17,17 +17,25 @@ const Welcome: React.FC = () => {
 
   const handleLogout = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/logout', { method: 'POST', credentials: 'include' }); // Assuming logout is a POST request
+      const response = await fetch('http://localhost:8000/api/logout', { method: 'POST', credentials: 'include' });
       const data = await response.json();
       if (response.ok) {
-        // Redirect to login or home page after successful logout
-        window.location.href = '/'; // Or navigate('/login');
+        // Redirect to login page after successful logout
+        window.location.href = '/login';
       } else {
         setMessage({ type: 'danger', text: data.message || 'Logout failed.' });
+        // Still redirect to login on failure
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
       }
     } catch (error) {
       console.error('Error during logout:', error);
       setMessage({ type: 'danger', text: 'An error occurred during logout.' });
+      // Redirect to login even on error
+      setTimeout(() => {
+        window.location.href = '/login';
+      }, 2000);
     }
   };
 

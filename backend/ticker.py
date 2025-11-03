@@ -99,15 +99,92 @@ class Ticker:
 
         conn.close()
 
-        for strategy_info in self.running_strategies.values():
-            strategy_info['strategy'].process_ticks(ticks)
+        # Process ticks for strategies and emit updates
+        for unique_run_id, strategy_info in self.running_strategies.items():
+            strategy_obj = strategy_info['strategy']
+            db_id = strategy_info.get('db_id')
+            user_id = strategy_info.get('user_id', 0)
+            
+            # Process ticks for this strategy with error handling
+            try:
+                strategy_obj.process_ticks(ticks)
+            except Exception as e:
+                logging.error(f"Error processing ticks for strategy {db_id} ({strategy_info.get('name', 'unknown')}): {e}", exc_info=True)
+                # Don't stop other strategies if one fails
+            
+            # Emit strategy update to subscribed clients
+            if db_id and user_id:
+                try:
+                    room_name = f"strategy_{user_id}_{db_id}"
+                    strategy_status = strategy_obj.status if hasattr(strategy_obj, 'status') else {}
+                    
+                    # Prepare metrics
+                    metrics = {
+                        'currentPrice': strategy_status.get('current_price', strategy_status.get('current_ltp', 0)),
+                        'entryPrice': strategy_status.get('entry_price', 0),
+                        'currentPnL': strategy_status.get('pnl', 0),
+                        'unrealizedPnL': strategy_status.get('pnl', 0),
+                        'realizedPnL': strategy_status.get('realized_pnl', 0),
+                        'quantity': strategy_status.get('quantity', 0),
+                        'status': strategy_status.get('state', 'running'),
+                        'instrument': strategy_info.get('instrument', ''),
+                        'strategyName': strategy_info.get('name', '')
+                    }
+                    
+                    # Emit to strategy room
+                    self.socketio.emit('strategy_update', {
+                        'strategy_id': str(db_id),
+                        'metrics': metrics,
+                        'log': {
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'action': strategy_status.get('message', 'Processing'),
+                            'price': metrics['currentPrice'],
+                            'quantity': metrics['quantity'],
+                            'pnl': metrics['currentPnL'],
+                            'status': 'active'
+                        }
+                    }, room=room_name)
+                except Exception as e:
+                    logging.error(f"Error emitting strategy update for strategy {db_id}: {e}", exc_info=True)
         
         # Broadcast ticks to the frontend
-        for tick in ticks:
-            if tick['instrument_token'] == 256265: # NIFTY 50
-                self.socketio.emit('market_data', {'nifty_price': tick['last_price']})
-            elif tick['instrument_token'] == 260105: # NIFTY BANK
-                self.socketio.emit('market_data', {'banknifty_price': tick['last_price']})
+        try:
+            for tick in ticks:
+                instrument_token = tick.get('instrument_token')
+                last_price = tick.get('last_price')
+                
+                if not instrument_token or last_price is None:
+                    continue
+                
+                # Emit to market data rooms
+                try:
+                    self.socketio.emit('market_data', {
+                        'instrument_token': instrument_token,
+                        'last_price': last_price,
+                        'timestamp': datetime.datetime.now().isoformat(),
+                        'volume': tick.get('volume', 0)
+                    }, namespace='/')
+                except Exception as e:
+                    logging.error(f"Error emitting market_data: {e}")
+                
+                # Legacy market data for dashboard - emit separately for backward compatibility
+                try:
+                    if instrument_token == 256265: # NIFTY 50
+                        self.socketio.emit('market_data', {
+                            'nifty_price': str(last_price),
+                            'instrument_token': instrument_token,
+                            'last_price': last_price
+                        }, namespace='/')
+                    elif instrument_token == 260105: # NIFTY BANK
+                        self.socketio.emit('market_data', {
+                            'banknifty_price': str(last_price),
+                            'instrument_token': instrument_token,
+                            'last_price': last_price
+                        }, namespace='/')
+                except Exception as e:
+                    logging.error(f"Error emitting legacy market_data: {e}")
+        except Exception as e:
+            logging.error(f"Error broadcasting ticks to frontend: {e}", exc_info=True)
 
     def on_connect(self, ws, response):
         logging.info("Kite Ticker connected")

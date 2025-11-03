@@ -102,7 +102,19 @@ class CaptureMountainSignal(BaseStrategy):
 
         latest_tick = ticks[-1] # Assuming ticks are ordered by time
         current_ltp = latest_tick['last_price']
-        tick_timestamp = latest_tick['timestamp']
+        # Extract timestamp safely - handle different timestamp formats
+        tick_timestamp = None
+        if 'timestamp' in latest_tick:
+            tick_timestamp = latest_tick['timestamp']
+        elif 'last_trade_time' in latest_tick:
+            tick_timestamp = latest_tick['last_trade_time']
+        elif 'exchange_timestamp' in latest_tick:
+            tick_timestamp = latest_tick['exchange_timestamp']
+        
+        if not tick_timestamp:
+            # Skip this tick if no timestamp available
+            logging.warning(f"Skipping tick in capture_mountain_signal due to missing timestamp: {latest_tick}")
+            return
 
         self.status['current_ltp'] = current_ltp
 

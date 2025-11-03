@@ -69,6 +69,14 @@ scheduler.start()
 def make_session_permanent():
     session.permanent = False
 
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404 errors with JSON response for API routes"""
+    if request.path.startswith('/api/'):
+        return jsonify({'status': 'error', 'message': 'Route not found'}), 404
+    # For non-API routes, return a simple text response
+    return 'Not Found', 404
+
 # Initialize KiteConnect
 kite = KiteConnect(api_key="default_api_key") # The API key will be set dynamically
 
@@ -597,6 +605,15 @@ def save_strategy():
         strike_price = data.get('strike-price') or data.get('strike_price')
         expiry_type = data.get('expiry-type') or data.get('expiry_type')
         ema_period = data.get('ema-period') or data.get('ema_period')
+        # Enhanced strategy data (stored as JSON strings)
+        indicators = data.get('indicators', [])
+        entry_rules = data.get('entry_rules', [])
+        exit_rules = data.get('exit_rules', [])
+        
+        import json
+        indicators_json = json.dumps(indicators) if indicators else None
+        entry_rules_json = json.dumps(entry_rules) if entry_rules else None
+        exit_rules_json = json.dumps(exit_rules) if exit_rules else None
     else:
         strategy_id = request.form.get('strategy_id')
         strategy_name_input = request.form.get('strategy-name')
@@ -617,18 +634,44 @@ def save_strategy():
 
     conn = get_db_connection()
     try:
+        import json
+        
+        # Prepare JSON data
+        indicators_json = None
+        entry_rules_json = None
+        exit_rules_json = None
+        
+        if request.is_json:
+            indicators = data.get('indicators', [])
+            entry_rules = data.get('entry_rules', [])
+            exit_rules = data.get('exit_rules', [])
+            indicators_json = json.dumps(indicators) if indicators else None
+            entry_rules_json = json.dumps(entry_rules) if entry_rules else None
+            exit_rules_json = json.dumps(exit_rules) if exit_rules else None
+        
         if strategy_id:
             # Update existing strategy
             conn.execute(
-                'UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ?, ema_period = ? WHERE id = ? AND user_id = ?',
-                (strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period, strategy_id, user_id)
+                '''UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, 
+                   start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, 
+                   trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ?, 
+                   ema_period = ?, indicators = ?, entry_rules = ?, exit_rules = ?, updated_at = CURRENT_TIMESTAMP 
+                   WHERE id = ? AND user_id = ?''',
+                (strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, 
+                 stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, 
+                 expiry_type, ema_period, indicators_json, entry_rules_json, exit_rules_json, strategy_id, user_id)
             )
             message = 'Strategy updated successfully!'
         else:
             # Insert new strategy
             conn.execute(
-                'INSERT INTO strategies (user_id, strategy_name, strategy_type, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (user_id, strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, ema_period)
+                '''INSERT INTO strategies (user_id, strategy_name, strategy_type, instrument, candle_time, start_time, 
+                   end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
+                   strike_price, expiry_type, ema_period, indicators, entry_rules, exit_rules) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (user_id, strategy_name_input, strategy_type, instrument, candle_time, execution_start, 
+                 execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
+                 strike_price, expiry_type, ema_period, indicators_json, entry_rules_json, exit_rules_json)
             )
             message = 'Strategy saved successfully!'
         conn.commit()
@@ -655,9 +698,20 @@ def edit_strategy(strategy_id):
         return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
 
 @app.route("/strategy/delete/<int:strategy_id>", methods=['POST'])
+@app.route("/api/strategy/delete/<int:strategy_id>", methods=['POST'])
 def delete_strategy(strategy_id):
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    # If strategy is running, stop it first
+    unique_run_id_to_del = None
+    for unique_run_id, running_strat_info in running_strategies.items():
+        if running_strat_info.get('db_id') == strategy_id:
+            unique_run_id_to_del = unique_run_id
+            break
+    
+    if unique_run_id_to_del:
+        del running_strategies[unique_run_id_to_del]
 
     conn = get_db_connection()
     try:
@@ -666,15 +720,23 @@ def delete_strategy(strategy_id):
         return jsonify({'status': 'success', 'message': 'Strategy deleted successfully!'})
     except Exception as e:
         conn.rollback()
-        logging.error(f"Error deleting strategy: {e}")
+        logging.error(f"Error deleting strategy: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': f'Error deleting strategy: {e}'}), 500
     finally:
         conn.close()
 
-@app.route("/strategy/deploy/<int:strategy_id>", methods=['POST'])
+@app.route("/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
+@app.route("/api/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
 def deploy_strategy(strategy_id):
-    if 'user_id' not in session or 'access_token' not in session:
-        return jsonify({'status': 'error', 'message': 'User not logged in or Zerodha not connected'}), 401
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
 
     conn = get_db_connection()
     strategy_data = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id'])).fetchone()
@@ -683,7 +745,19 @@ def deploy_strategy(strategy_id):
     if not strategy_data:
         return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
 
-    paper_trade = request.form.get('paper_trade') == 'on'
+    # Handle both form and JSON requests - be lenient with parsing
+    paper_trade = False
+    try:
+        if request.content_type and 'application/json' in request.content_type:
+            # Try to parse JSON, but don't fail if it's empty or invalid
+            data = request.get_json(silent=True, force=True)
+            if data:
+                paper_trade = data.get('paper_trade', False)
+        elif request.form:
+            paper_trade = request.form.get('paper_trade') == 'on'
+    except Exception as e:
+        logging.warning(f"Error parsing request data in deploy_strategy: {e}")
+        paper_trade = False
 
     # Check if strategy is already running
     for unique_run_id, running_strat_info in running_strategies.items():
@@ -729,7 +803,8 @@ def deploy_strategy(strategy_id):
             'instrument': strategy_data['instrument'],
             'status': 'running',
             'strategy_type': strategy_type, # Add strategy_type here
-            'strategy': strategy # Store the actual strategy object
+            'strategy': strategy, # Store the actual strategy object
+            'user_id': session['user_id'] # Add user_id for WebSocket room management
         }
 
         # Update status in DB
@@ -740,14 +815,18 @@ def deploy_strategy(strategy_id):
 
         return jsonify({'status': 'success', 'message': 'Strategy deployed successfully!'})
     except Exception as e:
-        logging.error(f"Error deploying strategy {strategy_id}: {e}")
-        conn = get_db_connection()
-        conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('error', strategy_id))
-        conn.commit()
-        conn.close()
-        return jsonify({'status': 'error', 'message': f'Error deploying strategy: {e}'}), 500
+        logging.error(f"Error deploying strategy {strategy_id}: {e}", exc_info=True)
+        try:
+            conn = get_db_connection()
+            conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('error', strategy_id))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+        return jsonify({'status': 'error', 'message': f'Error deploying strategy: {str(e)}'}), 500
 
 @app.route("/strategy/pause/<int:strategy_id>", methods=['POST'])
+@app.route("/api/strategy/pause/<int:strategy_id>", methods=['POST'])
 def pause_strategy(strategy_id):
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
@@ -768,6 +847,7 @@ def pause_strategy(strategy_id):
     return jsonify({'status': 'error', 'message': 'Running strategy not found'}), 404
 
 @app.route("/strategy/squareoff/<int:strategy_id>", methods=['POST'])
+@app.route("/api/strategy/squareoff/<int:strategy_id>", methods=['POST'])
 def squareoff_strategy(strategy_id):
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
@@ -922,12 +1002,12 @@ def connect(auth=None):
                 error_msg = str(e)
                 if "Invalid `api_key` or `access_token`" in error_msg or "Incorrect `api_key` or `access_token`" in error_msg:
                     session.pop('access_token', None)
-                    emit('unauthorized', {'message': 'Your Zerodha session has expired. Please log in again.'})
                     logging.warning("SocketIO: Invalid access token")
+                    # Don't emit before returning False - SocketIO will handle rejection
                     return False  # Reject connection
                 else:
                     logging.error(f"SocketIO: Error validating token: {e}")
-                    emit('error', {'message': 'Error validating session'})
+                    # Don't emit before returning False
                     return False
 
             conn = get_db_connection()
@@ -936,7 +1016,7 @@ def connect(auth=None):
 
             if user is None:
                 logging.error(f"SocketIO connect error: User with ID {session['user_id']} not found in DB.")
-                emit('error', {'message': 'User not found'})
+                # Don't emit before returning False
                 return False
 
             if user['app_key'] is None or session['access_token'] is None:
@@ -951,7 +1031,7 @@ def connect(auth=None):
                         ticker.start()
                         logging.info("SocketIO: Ticker started successfully")
                     except Exception as e:
-                        logging.error(f"SocketIO: Error starting ticker: {e}")
+                        logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
                         emit('error', {'message': 'Failed to start market data feed'})
         else:
             logging.info("SocketIO: Connected without authentication (no user_id or access_token in session)")
@@ -962,8 +1042,8 @@ def connect(auth=None):
         logging.info("SocketIO: Connection accepted")
         return True  # Accept connection
     except Exception as e:
-        logging.error(f"SocketIO connect error: {e}")
-        emit('error', {'message': 'Connection error'})
+        logging.error(f"SocketIO connect error: {e}", exc_info=True)
+        # Don't emit before returning False - it causes "write() before start_response"
         return False  # Reject connection on error
 
 @socketio.on('disconnect')
@@ -1133,20 +1213,113 @@ def stop_tick_collection():
     return jsonify({'status': 'success'})
 
 @app.route("/strategy/status/<strategy_id>")
+@app.route("/api/strategy/status/<strategy_id>")
 def strategy_status(strategy_id):
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
+    try:
+        strategy_id_int = int(strategy_id)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid strategy ID'}), 400
+
     # Find the running strategy by its db_id
     for unique_run_id, running_strat_info in running_strategies.items():
-        if running_strat_info['db_id'] == int(strategy_id):
-            strategy_obj = running_strat_info['strategy']
-            status_data = strategy_obj.status
-            status_data['strategy_type'] = running_strat_info['strategy_type'] # Add strategy type
-            status_data['strategy_name_display'] = running_strat_info['name'] # Add strategy display name
-            return jsonify(status_data)
+        if running_strat_info.get('db_id') == strategy_id_int:
+            try:
+                strategy_obj = running_strat_info.get('strategy')
+                if strategy_obj and hasattr(strategy_obj, 'status'):
+                    status_dict = strategy_obj.status
+                    if isinstance(status_dict, dict):
+                        status_data = status_dict.copy()
+                    else:
+                        status_data = dict(status_dict) if hasattr(status_dict, '__dict__') else {}
+                else:
+                    status_data = {}
+                
+                status_data['strategy_type'] = running_strat_info.get('strategy_type', 'unknown')
+                status_data['strategy_name_display'] = running_strat_info.get('name', 'Unknown Strategy')
+                status_data['status'] = running_strat_info.get('status', 'running')
+                status_data['running'] = True
+                return jsonify(status_data)
+            except Exception as e:
+                logging.error(f"Error getting strategy status for {strategy_id}: {e}", exc_info=True)
+                return jsonify({
+                    'status': 'error', 
+                    'message': f'Error retrieving strategy status: {str(e)}',
+                    'running': False
+                }), 500
     
-    return jsonify({'status': 'error', 'message': 'Strategy not running'}), 404
+    # Strategy not in running_strategies - check database to see if it exists
+    conn = get_db_connection()
+    try:
+        strategy_row = conn.execute(
+            'SELECT strategy_name, status FROM strategies WHERE id = ? AND user_id = ?',
+            (strategy_id_int, session['user_id'])
+        ).fetchone()
+        
+        if strategy_row:
+            # Strategy exists but is not currently running
+            return jsonify({
+                'status': 'not_running',
+                'strategy_name_display': strategy_row['strategy_name'],
+                'db_status': strategy_row['status'],
+                'running': False,
+                'message': f"Strategy '{strategy_row['strategy_name']}' is not currently running. Status: {strategy_row['status']}"
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+    except Exception as e:
+        logging.error(f"Error checking database for strategy {strategy_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Error checking strategy status'}), 500
+    finally:
+        conn.close()
+
+# WebSocket handlers for strategy monitoring
+@socketio.on('subscribe_strategy')
+def handle_subscribe_strategy(data):
+    """Subscribe to real-time updates for a specific strategy"""
+    if 'user_id' not in session:
+        emit('error', {'message': 'User not authenticated'})
+        return
+    
+    strategy_id = data.get('strategy_id')
+    if not strategy_id:
+        emit('error', {'message': 'Strategy ID required'})
+        return
+    
+    # Join a room for this strategy
+    from flask_socketio import join_room
+    room_name = f"strategy_{session['user_id']}_{strategy_id}"
+    join_room(room_name)
+    logging.info(f"User {session['user_id']} subscribed to strategy {strategy_id}")
+    emit('subscribed', {'strategy_id': str(strategy_id), 'message': 'Subscribed to strategy updates'})
+
+@socketio.on('unsubscribe_strategy')
+def handle_unsubscribe_strategy(data):
+    """Unsubscribe from strategy updates"""
+    if 'user_id' not in session:
+        return
+    
+    strategy_id = data.get('strategy_id')
+    if strategy_id:
+        from flask_socketio import leave_room
+        room_name = f"strategy_{session['user_id']}_{strategy_id}"
+        leave_room(room_name)
+        logging.info(f"User {session['user_id']} unsubscribed from strategy {strategy_id}")
+
+@socketio.on('subscribe_market_data')
+def handle_subscribe_market_data(data):
+    """Subscribe to market data for strategy monitoring"""
+    if 'user_id' not in session:
+        emit('error', {'message': 'User not authenticated'})
+        return
+    
+    # Join market data room
+    from flask_socketio import join_room
+    room_name = f"market_data_{session['user_id']}"
+    join_room(room_name)
+    emit('subscribed', {'message': 'Subscribed to market data'})
 
 app.register_blueprint(chat_bp)
 

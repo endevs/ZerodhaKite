@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import EnhancedAdvancedStrategyBuilder from './EnhancedAdvancedStrategyBuilder';
 
 // Enhanced Market Data Component
 const MarketData: React.FC<{ niftyPrice: string; bankNiftyPrice: string }> = ({ niftyPrice, bankNiftyPrice }) => (
@@ -59,381 +60,55 @@ const AccountInfo: React.FC<{ balance: string; access_token: boolean }> = ({ bal
   </div>
 );
 
-const StrategyConfiguration: React.FC<{ onStrategySaved: () => void }> = ({ onStrategySaved }) => {
-  const [selectedStrategy, setSelectedStrategy] = useState<string>('');
-  const [strategyName, setStrategyName] = useState<string>('');
-  const [emaPeriod, setEmaPeriod] = useState<number>(5);
-  const [segment, setSegment] = useState<string>('Option');
-  const [totalLot, setTotalLot] = useState<number>(1);
-  const [tradeType, setTradeType] = useState<string>('Buy');
-  const [strikePrice, setStrikePrice] = useState<string>('ATM');
-  const [expiryType, setExpiryType] = useState<string>('Weekly');
-  const [instrument, setInstrument] = useState<string>('NIFTY');
-  const [candleTime, setCandleTime] = useState<string>('5');
-  const [executionStart, setExecutionStart] = useState<string>('09:15');
-  const [executionEnd, setExecutionEnd] = useState<string>('15:00');
-  const [stopLoss, setStopLoss] = useState<number>(1);
-  const [targetProfit, setTargetProfit] = useState<number>(2);
-  const [trailingStopLoss, setTrailingStopLoss] = useState<number>(0.5);
-  const [paperTrade, setPaperTrade] = useState<boolean>(false);
-  const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
-
-  const strategyDescriptions: { [key: string]: string } = {
-    'orb': `
-      <h5>Opening Range Breakout (ORB)</h5>
-      <p>This strategy identifies the high and low of the opening range and places a trade when the price breaks out of this range.</p>
-      <strong>Timeframe:</strong> Configurable (e.g., 15 minutes)<br>
-      <strong>Instruments:</strong> Nifty & BankNifty<br>
-      <strong>Logic:</strong><br>
-      <ul>
-          <li><strong>Opening Range:</strong> The high and low of the first 'x' minutes of the trading session.</li>
-          <li><strong>Buy Signal:</strong> Price breaks above the opening range high.</li>
-          <li><strong>Sell Signal:</strong> Price breaks below the opening range low.</li>
-          <li><strong>Stop Loss & Target:</strong> Configurable percentages.</li>
-      </ul>
-    `,
-    'capture_mountain_signal': `
-      <h5>Capture Mountain Signal</h5>
-      <p><strong>Instruments:</strong> Nifty & BankNifty ATM Options</p>
-      <p><strong>Timeframe:</strong> 5-minute candles</p>
-      <p><strong>Indicator:</strong> 5-period EMA</p>
-      <h6>PE (Put Entry) Logic</h6>
-      <ul>
-          <li><strong>Signal Candle:</strong> Candle's LOW > 5 EMA</li>
-          <li><strong>Entry Trigger:</strong> Next candle CLOSE < signal candle's LOW</li>
-          <li><strong>Stop Loss:</strong> Price closes above signal candle's HIGH</li>
-          <li><strong>Target:</strong> Wait for at least 1 candle where HIGH < 5 EMA, then if 2 consecutive candles CLOSE > 5 EMA -> Exit PE trade</li>
-      </ul>
-      <h6>CE (Call Entry) Logic</h6>
-      <ul>
-          <li><strong>Signal Candle:</strong> Candle's HIGH < 5 EMA</li>
-          <li><strong>Entry Trigger:</strong> Next candle CLOSE > signal candle's HIGH</li>
-          <li><strong>Stop Loss:</strong> Price closes below signal candle's LOW</li>
-          <li><strong>Target:</strong> Wait for at least 1 candle where LOW > 5 EMA, then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade</li>
-      </ul>
-    `,
-  };
-
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setMessage(null);
-
-    const formData = {
-      strategy: selectedStrategy,
-      'strategy-name': strategyName,
-      'ema-period': emaPeriod,
-      segment,
-      'total-lot': totalLot,
-      'trade-type': tradeType,
-      'strike-price': strikePrice,
-      'expiry-type': expiryType,
-      instrument,
-      'candle-time': candleTime,
-      'execution-start': executionStart,
-      'execution-end': executionEnd,
-      'stop-loss': stopLoss,
-      'target-profit': targetProfit,
-      'trailing-stop-loss': trailingStopLoss,
-      paper_trade: paperTrade,
-    };
-
-    try {
-      const response = await fetch('http://localhost:8000/api/strategy/save', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(formData),
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        setMessage({ type: 'success', text: data.message || 'Strategy saved successfully!' });
-        onStrategySaved(); // Callback to refresh saved strategies
-        // Optionally reset form
-      } else {
-        setMessage({ type: 'danger', text: data.message || 'Failed to save strategy.' });
-      }
-    } catch (error) {
-      console.error('Error saving strategy:', error);
-      setMessage({ type: 'danger', text: 'An error occurred. Please try again.' });
-    }
-  };
-
-  return (
-    <div className="accordion-item">
-      <h2 className="accordion-header" id="headingOne">
-        <button
-          className="accordion-button"
-          type="button"
-          data-bs-toggle="collapse"
-          data-bs-target="#collapseOne"
-          aria-expanded="true"
-          aria-controls="collapseOne"
-        >
-          Strategy Configuration
-        </button>
-      </h2>
-      <div id="collapseOne" className="accordion-collapse collapse show" aria-labelledby="headingOne" data-bs-parent="#dashboardAccordion">
-        <div className="accordion-body">
-          <div className="mb-3">
-            <label htmlFor="strategy-select" className="form-label">Select Strategy</label>
-            <select
-              className="form-select"
-              id="strategy-select"
-              value={selectedStrategy}
-              onChange={(e) => setSelectedStrategy(e.target.value)}
-            >
-              <option value="" disabled>Select Strategy</option>
-              <option value="orb">Opening Range Breakout (ORB)</option>
-              <option value="capture_mountain_signal">Capture Mountain Signal</option>
-            </select>
-          </div>
-          <div
-            id="strategy-description"
-            className="alert alert-info"
-            dangerouslySetInnerHTML={{ __html: strategyDescriptions[selectedStrategy] || '' }}
-          ></div>
-          <div id="orb-strategy-form">
-            {message && (
-              <div className={`alert alert-${message.type}`}>
-                {message.text}
-              </div>
-            )}
-            <form onSubmit={handleSubmit}>
-              <input type="hidden" name="strategy" id="strategy-input" value={selectedStrategy} />
-              <input type="hidden" name="strategy_id" id="strategy-id" />
-              <div className="row">
-                <div className="col-md-12 mb-3">
-                  <label htmlFor="strategy-name" className="form-label">Strategy Name</label>
-                  <input
-                    type="text"
-                    className="form-control"
-                    id="strategy-name"
-                    name="strategy-name"
-                    value={strategyName}
-                    onChange={(e) => setStrategyName(e.target.value)}
-                    required
-                  />
-                </div>
-              </div>
-              {selectedStrategy === 'capture_mountain_signal' && (
-                <div className="row">
-                  <div className="col-md-12 mb-3">
-                    <label htmlFor="ema-period" className="form-label">EMA Period</label>
-                    <input
-                      type="number"
-                      className="form-control"
-                      id="ema-period"
-                      name="ema-period"
-                      value={emaPeriod}
-                      onChange={(e) => setEmaPeriod(Number(e.target.value))}
-                    />
-                  </div>
-                </div>
-              )}
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="segment" className="form-label">Select Segment</label>
-                  <select
-                    className="form-select"
-                    id="segment"
-                    name="segment"
-                    value={segment}
-                    onChange={(e) => setSegment(e.target.value)}
-                    disabled
-                  >
-                    <option value="Option">Option</option>
-                    <option value="Future">Future</option>
-                  </select>
-                </div>
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="total-lot" className="form-label">Total Lot</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    id="total-lot"
-                    name="total-lot"
-                    min={1}
-                    max={50}
-                    value={totalLot}
-                    onChange={(e) => setTotalLot(Number(e.target.value))}
-                    required
-                  />
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="trade-type" className="form-label">Buy or Sell</label>
-                  <select
-                    className="form-select"
-                    id="trade-type"
-                    name="trade-type"
-                    value={tradeType}
-                    onChange={(e) => setTradeType(e.target.value)}
-                    disabled
-                  >
-                    <option value="Buy">Buy</option>
-                    <option value="Sell">Sell</option>
-                  </select>
-                </div>
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="strike-price" className="form-label">Strike Price</label>
-                  <input
-                    type="text"
-                    className="form-control"
-                    id="strike-price"
-                    name="strike-price"
-                    value={strikePrice}
-                    onChange={(e) => setStrikePrice(e.target.value)}
-                    readOnly
-                  />
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="expiry-type" className="form-label">Expiry Type</label>
-                  <select
-                    className="form-select"
-                    id="expiry-type"
-                    name="expiry-type"
-                    value={expiryType}
-                    onChange={(e) => setExpiryType(e.target.value)}
-                  >
-                    <option value="Weekly">Weekly</option>
-                    <option value="Next Weekly">Next Weekly</option>
-                    <option value="Monthly">Monthly</option>
-                  </select>
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="instrument" className="form-label">Instrument</label>
-                  <select
-                    className="form-select"
-                    id="instrument"
-                    name="instrument"
-                    value={instrument}
-                    onChange={(e) => setInstrument(e.target.value)}
-                  >
-                    <option value="NIFTY">NIFTY</option>
-                    <option value="BANKNIFTY">BANKNIFTY</option>
-                  </select>
-                </div>
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="candle-time" className="form-label">Candle Time</label>
-                  <select
-                    className="form-select"
-                    id="candle-time"
-                    name="candle-time"
-                    value={candleTime}
-                    onChange={(e) => setCandleTime(e.target.value)}
-                  >
-                    <option value="5">5 minutes</option>
-                    <option value="10">10 minutes</option>
-                    <option value="15">15 minutes</option>
-                  </select>
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="execution-start" className="form-label">Execution Start</label>
-                  <input
-                    type="time"
-                    className="form-control"
-                    id="execution-start"
-                    name="execution-start"
-                    value={executionStart}
-                    onChange={(e) => setExecutionStart(e.target.value)}
-                  />
-                </div>
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="execution-end" className="form-label">Execution End</label>
-                  <input
-                    type="time"
-                    className="form-control"
-                    id="execution-end"
-                    name="execution-end"
-                    value={executionEnd}
-                    onChange={(e) => setExecutionEnd(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="stop-loss" className="form-label">Stop Loss (%)</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    id="stop-loss"
-                    name="stop-loss"
-                    value={stopLoss}
-                    onChange={(e) => setStopLoss(Number(e.target.value))}
-                  />
-                </div>
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="target-profit" className="form-label">Target Profit (%)</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    id="target-profit"
-                    name="target-profit"
-                    value={targetProfit}
-                    onChange={(e) => setTargetProfit(Number(e.target.value))}
-                  />
-                </div>
-              </div>
-              <div className="row">
-                <div className="col-md-6 mb-3">
-                  <label htmlFor="trailing-stop-loss" className="form-label">Trailing Stop Loss (%)</label>
-                  <input
-                    type="number"
-                    className="form-control"
-                    id="trailing-stop-loss"
-                    name="trailing-stop-loss"
-                    value={trailingStopLoss}
-                    onChange={(e) => setTrailingStopLoss(Number(e.target.value))}
-                  />
-                </div>
-                <div className="col-md-6 mb-3 form-check mt-4">
-                  <input
-                    type="checkbox"
-                    className="form-check-input"
-                    id="paper-trade"
-                    name="paper_trade"
-                    checked={paperTrade}
-                    onChange={(e) => setPaperTrade(e.target.checked)}
-                  />
-                  <label className="form-check-label" htmlFor="paper-trade">Paper Trade</label>
-                </div>
-              </div>
-              <button type="submit" className="btn btn-primary">Save Strategy</button>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+const StrategyConfiguration: React.FC<{ 
+  onStrategySaved: () => void; 
+  editingStrategy?: any;
+  isOpen?: boolean;
+  onToggle?: (open: boolean) => void;
+}> = ({ onStrategySaved, editingStrategy, isOpen, onToggle }) => {
+  return <EnhancedAdvancedStrategyBuilder 
+    onStrategySaved={onStrategySaved} 
+    editingStrategy={editingStrategy}
+    isOpen={isOpen}
+    onToggle={onToggle}
+  />;
 };
 
 interface Strategy {
   id: string;
   strategy_name: string;
+  strategy_type?: string;
   instrument: string;
   expiry_type: string;
   total_lot: number;
   status: string;
+  stop_loss?: number;
+  target_profit?: number;
+  candle_time?: string;
+  start_time?: string;
+  end_time?: string;
+  segment?: string;
+  trade_type?: string;
+  strike_price?: string;
+  trailing_stop_loss?: number;
+  indicators?: string; // JSON string
+  entry_rules?: string; // JSON string
+  exit_rules?: string; // JSON string
   // Add other strategy properties as needed
 }
 
 interface SavedStrategiesProps {
   onViewLive: (strategyId: string) => void;
   onStrategyUpdated: number;
+  onEditStrategy?: (strategy: Strategy) => void;
+  isOpen?: boolean;
+  onToggle?: (open: boolean) => void;
 }
 
-const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrategyUpdated }) => {
+const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrategyUpdated, onEditStrategy, isOpen = false, onToggle }) => {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [selectedStrategyInfo, setSelectedStrategyInfo] = useState<Strategy | null>(null);
+  const [showStrategyInfoModal, setShowStrategyInfoModal] = useState<boolean>(false);
 
   const fetchStrategies = async () => {
     try {
@@ -452,10 +127,60 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
   useEffect(() => {
     fetchStrategies();
   }, [onStrategyUpdated]); // Re-fetch when onStrategyUpdated is called
+  
+  // Also fetch on initial load and when the section is expanded
+  useEffect(() => {
+    const savedStrategiesSection = document.getElementById('collapseTwo');
+    if (savedStrategiesSection) {
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+            const target = mutation.target as HTMLElement;
+            if (target.classList.contains('show')) {
+              // Section is now expanded, refresh strategies
+              fetchStrategies();
+            }
+          }
+        });
+      });
+      
+      observer.observe(savedStrategiesSection, {
+        attributes: true,
+        attributeFilter: ['class']
+      });
+      
+      return () => observer.disconnect();
+    }
+  }, []);
 
-  const handleEditStrategy = (strategyId: string) => {
-    console.log('Edit strategy:', strategyId);
-    // Implement edit logic, e.g., populate form with strategy data
+  const handleEditStrategy = async (strategyId: string) => {
+    try {
+      const response = await fetch(`http://localhost:8000/strategy/edit/${strategyId}`, { credentials: 'include' });
+      const data = await response.json();
+      if (response.ok && data.status === 'success') {
+        const strategyToEdit = data.strategy;
+        if (onEditStrategy) {
+          onEditStrategy(strategyToEdit);
+        }
+        // Scroll to strategy builder
+        setTimeout(() => {
+          const collapseElement = document.getElementById('collapseOne');
+          if (collapseElement) {
+            collapseElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            // Expand if collapsed
+            if (!collapseElement.classList.contains('show')) {
+              const bsCollapse = new (window as any).bootstrap.Collapse(collapseElement);
+              bsCollapse.show();
+            }
+          }
+        }, 300);
+      } else {
+        alert('Error: ' + (data.message || 'Failed to load strategy'));
+      }
+    } catch (error) {
+      console.error('Error loading strategy for edit:', error);
+      alert('An error occurred while loading the strategy.');
+    }
   };
 
   const handleDeleteStrategy = async (strategyId: string) => {
@@ -479,17 +204,35 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
 
   const handleDeployStrategy = async (strategyId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/strategy/deploy/${strategyId}`, { method: 'POST', credentials: 'include' });
-      const data = await response.json();
+      const response = await fetch(`http://localhost:8000/api/strategy/deploy/${strategyId}`, { 
+        method: 'POST', 
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      });
+      
+      let data;
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.error('Non-JSON response:', text);
+        alert(`Error deploying strategy: ${response.status} ${response.statusText}. Please check if backend server is running and route exists.`);
+        return;
+      }
+      
       if (response.ok) {
-        alert(data.message);
+        alert(data.message || 'Strategy deployed successfully!');
         fetchStrategies();
       } else {
-        alert('Error: ' + data.message);
+        alert('Error: ' + (data.message || 'Failed to deploy strategy'));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error deploying strategy:', error);
-      alert('An error occurred while deploying the strategy.');
+      alert(`An error occurred while deploying the strategy: ${error.message}`);
     }
   };
 
@@ -532,25 +275,30 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
     <div className="accordion-item mt-3">
       <h2 className="accordion-header" id="headingTwo">
         <button
-          className="accordion-button collapsed"
+          className={`accordion-button ${isOpen ? '' : 'collapsed'}`}
           type="button"
-          data-bs-toggle="collapse"
-          data-bs-target="#collapseTwo"
-          aria-expanded="false"
+          onClick={() => onToggle && onToggle(!isOpen)}
+          aria-expanded={isOpen}
           aria-controls="collapseTwo"
         >
           Saved Strategies
         </button>
       </h2>
-      <div id="collapseTwo" className="accordion-collapse collapse" aria-labelledby="headingTwo" data-bs-parent="#dashboardAccordion">
+      <div 
+        id="collapseTwo" 
+        className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`} 
+        aria-labelledby="headingTwo" 
+        data-bs-parent="#dashboardAccordion"
+      >
         <div className="accordion-body">
           <table className="table table-striped">
             <thead>
               <tr>
-                <th>Name</th>
+                <th>Strategy Name</th>
+                <th>Type</th>
                 <th>Instrument</th>
-                <th>Expiry</th>
                 <th>Lots</th>
+                <th>Stop Loss / Target</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -558,35 +306,438 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
             <tbody id="saved-strategies-table-body">
               {strategies.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>No strategies saved yet.</td>
+                  <td colSpan={7} className="text-center text-muted py-4">
+                    <i className="bi bi-inbox fs-1 d-block mb-2"></i>
+                    No strategies saved yet. Create your first strategy above!
+                  </td>
                 </tr>
               ) : (
                 strategies.map((strategy) => (
                   <tr key={strategy.id}>
-                    <td>{strategy.strategy_name}</td>
-                    <td>{strategy.instrument}</td>
-                    <td>{strategy.expiry_type}</td>
-                    <td>{strategy.total_lot}</td>
-                    <td>{strategy.status}</td>
                     <td>
-                      <button className="btn btn-sm btn-info" onClick={() => handleEditStrategy(strategy.id)}>Edit</button>
-                      <button className="btn btn-sm btn-danger" onClick={() => handleDeleteStrategy(strategy.id)}>Delete</button>
-                      {(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error' || strategy.status === 'sq_off') && (
-                        <button className="btn btn-sm btn-success" onClick={() => handleDeployStrategy(strategy.id)}>Deploy</button>
-                      )}
-                      {strategy.status === 'running' && (
-                        <>
-                          <button className="btn btn-sm btn-warning" onClick={() => handlePauseStrategy(strategy.id)}>Pause</button>
-                          <button className="btn btn-sm btn-danger" onClick={() => handleSquareOffStrategy(strategy.id)}>Square Off</button>
-                          <button className="btn btn-sm btn-primary" onClick={() => onViewLive(strategy.id)}>View Live</button>
-                        </>
-                      )}
+                      <div className="d-flex align-items-center">
+                        <strong className="me-2">{strategy.strategy_name || 'Unnamed Strategy'}</strong>
+                        <button
+                          type="button"
+                          className="btn btn-link p-0 text-info"
+                          style={{ fontSize: '0.9rem', lineHeight: '1', border: 'none', background: 'none' }}
+                          onClick={() => {
+                            setSelectedStrategyInfo(strategy);
+                            setShowStrategyInfoModal(true);
+                          }}
+                          title="View Strategy Details"
+                        >
+                          <i className="bi bi-info-circle"></i>
+                        </button>
+                      </div>
+                    </td>
+                    <td>
+                      <span className="badge bg-secondary">{strategy.strategy_type || 'custom'}</span>
+                    </td>
+                    <td>{strategy.instrument || 'N/A'}</td>
+                    <td>{strategy.total_lot || 1}</td>
+                    <td>
+                      <small>
+                        SL: {strategy.stop_loss || 0}% / TP: {strategy.target_profit || 0}%
+                      </small>
+                    </td>
+                    <td>
+                      <span className={`badge ${
+                        strategy.status === 'running' ? 'bg-success' :
+                        strategy.status === 'paused' ? 'bg-warning' :
+                        strategy.status === 'error' ? 'bg-danger' :
+                        strategy.status === 'sq_off' ? 'bg-info' :
+                        'bg-secondary'
+                      }`}>
+                        {strategy.status || 'saved'}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="btn-group" role="group">
+                        <button 
+                          className="btn btn-sm btn-info" 
+                          onClick={() => handleEditStrategy(strategy.id)}
+                          title="Edit Strategy"
+                        >
+                          <i className="bi bi-pencil"></i>
+                        </button>
+                        {(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error' || strategy.status === 'sq_off') && (
+                          <button 
+                            className="btn btn-sm btn-success" 
+                            onClick={() => handleDeployStrategy(strategy.id)}
+                            title="Deploy Strategy"
+                          >
+                            <i className="bi bi-play-fill"></i>
+                          </button>
+                        )}
+                        {strategy.status === 'running' && (
+                          <>
+                            <button 
+                              className="btn btn-sm btn-warning" 
+                              onClick={() => handlePauseStrategy(strategy.id)}
+                              title="Pause Strategy"
+                            >
+                              <i className="bi bi-pause-fill"></i>
+                            </button>
+                            <button 
+                              className="btn btn-sm btn-danger" 
+                              onClick={() => handleSquareOffStrategy(strategy.id)}
+                              title="Square Off"
+                            >
+                              <i className="bi bi-x-circle"></i>
+                            </button>
+                            <button 
+                              className="btn btn-sm btn-primary" 
+                              onClick={() => onViewLive(strategy.id)}
+                              title="View Live Monitoring"
+                            >
+                              <i className="bi bi-activity"></i>
+                            </button>
+                          </>
+                        )}
+                        <button 
+                          className="btn btn-sm btn-danger" 
+                          onClick={() => handleDeleteStrategy(strategy.id)}
+                          title="Delete Strategy"
+                        >
+                          <i className="bi bi-trash"></i>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Strategy Info Modal */}
+      {showStrategyInfoModal && selectedStrategyInfo && (
+        <div 
+          className="modal fade show d-block" 
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+          onClick={() => setShowStrategyInfoModal(false)}
+        >
+          <div className="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header bg-primary text-white">
+                <h5 className="modal-title">
+                  <i className="bi bi-info-circle me-2"></i>
+                  Strategy Details: {selectedStrategyInfo.strategy_name}
+                </h5>
+                <button
+                  type="button"
+                  className="btn-close btn-close-white"
+                  onClick={() => setShowStrategyInfoModal(false)}
+                ></button>
+              </div>
+              <div className="modal-body">
+                <StrategyInfoContent strategy={selectedStrategyInfo} />
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowStrategyInfoModal(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Component to display strategy information
+const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => {
+  // Parse JSON strings for indicators and rules
+  let indicators: any[] = [];
+  let entryRules: any[] = [];
+  let exitRules: any[] = [];
+  
+  try {
+    if (strategy.indicators) {
+      indicators = JSON.parse(strategy.indicators);
+    }
+  } catch (e) {
+    console.error('Error parsing indicators:', e);
+  }
+  
+  try {
+    if (strategy.entry_rules) {
+      entryRules = JSON.parse(strategy.entry_rules);
+    }
+  } catch (e) {
+    console.error('Error parsing entry rules:', e);
+  }
+  
+  try {
+    if (strategy.exit_rules) {
+      exitRules = JSON.parse(strategy.exit_rules);
+    }
+  } catch (e) {
+    console.error('Error parsing exit rules:', e);
+  }
+
+  // Strategy type descriptions
+  const getStrategyTypeDescription = (type: string | undefined) => {
+    switch (type) {
+      case 'orb':
+        return {
+          name: 'Opening Range Breakout (ORB)',
+          logic: `This strategy identifies the opening range (high and low) during the first ${strategy.candle_time || 15} minutes of trading. It enters a position when price breaks above the range high (long) or below the range low (short). The strategy uses the following logic:
+          
+• Opening Range: Calculated from ${strategy.start_time || '09:15'} to the first ${strategy.candle_time || 15} minutes
+• Entry Signal: Price breaks above range high (bullish) or below range low (bearish)
+• Stop Loss: ${strategy.stop_loss || 1}% from entry price
+• Target Profit: ${strategy.target_profit || 2}% from entry price
+• Position Size: ${strategy.total_lot || 1} lot(s) of ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'}
+• Trade Type: ${strategy.trade_type || 'Buy'}
+• Strike Selection: ${strategy.strike_price || 'ATM'} with ${strategy.expiry_type || 'Weekly'} expiry
+• Trailing Stop: ${strategy.trailing_stop_loss || 0}% trailing stop loss for profit protection`,
+          howItWorks: 'The ORB strategy capitalizes on the momentum that occurs when price breaks out of the opening range. This is based on the theory that the first 15-30 minutes often set the tone for the day. When price breaks above/below this range with volume, it indicates strong directional momentum.'
+        };
+      case 'capture_mountain_signal':
+        return {
+          name: 'Capture Mountain Signal',
+          logic: `This pattern recognition strategy identifies "mountain" formations in price charts. The strategy logic includes:
+          
+• Pattern Detection: Monitors price action for mountain-like patterns (peaks and valleys)
+• Signal Confirmation: Validates signals using technical indicators and price action
+• Entry: Enters on confirmed mountain pattern signals
+• Exit: Uses stop loss (${strategy.stop_loss || 1}%) and target profit (${strategy.target_profit || 2}%)
+• Position Management: ${strategy.total_lot || 1} lot(s) with trailing stop (${strategy.trailing_stop_loss || 0}%)
+• Execution Window: Active from ${strategy.start_time || '09:15'} to ${strategy.end_time || '15:00'}
+• Instrument: ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'} with ${strategy.expiry_type || 'Weekly'} expiry`,
+          howItWorks: 'The strategy analyzes candlestick patterns and price formations to identify mountain-like structures. When a mountain pattern is detected along with confirmation signals, the strategy enters trades anticipating trend reversals or continuations. It uses multiple timeframes and technical analysis to validate signals.'
+        };
+      case 'custom':
+        return {
+          name: 'Custom Strategy',
+          logic: `This is a custom-built strategy using technical indicators and custom rules. Strategy configuration:
+          
+• Indicators Used: ${indicators.length > 0 ? indicators.map((ind: any) => ind.name || ind.id).join(', ') : 'None configured'}
+• Entry Rules: ${entryRules.length} rule(s) defined
+• Exit Rules: ${exitRules.length} rule(s) defined
+• Risk Parameters: Stop Loss ${strategy.stop_loss || 1}%, Target ${strategy.target_profit || 2}%, Trailing Stop ${strategy.trailing_stop_loss || 0}%
+• Position Size: ${strategy.total_lot || 1} lot(s)
+• Execution: ${strategy.start_time || '09:15'} to ${strategy.end_time || '15:00'}
+• Instrument: ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'}`,
+          howItWorks: 'This custom strategy combines multiple technical indicators with logical conditions to generate entry and exit signals. The strategy evaluates conditions based on indicator values and executes trades when all conditions are met according to the defined rules.'
+        };
+      default:
+        return {
+          name: strategy.strategy_type || 'Unknown Strategy',
+          logic: 'Strategy logic details not available.',
+          howItWorks: 'This strategy uses custom logic configured during creation.'
+        };
+    }
+  };
+
+  const strategyInfo = getStrategyTypeDescription(strategy.strategy_type);
+
+  return (
+    <div>
+      {/* Basic Information */}
+      <div className="mb-4">
+        <h6 className="text-primary mb-3">
+          <i className="bi bi-card-heading me-2"></i>Basic Information
+        </h6>
+        <div className="row g-3">
+          <div className="col-md-6">
+            <strong>Strategy Name:</strong> {strategy.strategy_name}
+          </div>
+          <div className="col-md-6">
+            <strong>Type:</strong> <span className="badge bg-primary">{strategyInfo.name}</span>
+          </div>
+          <div className="col-md-6">
+            <strong>Instrument:</strong> {strategy.instrument}
+          </div>
+          <div className="col-md-6">
+            <strong>Segment:</strong> {strategy.segment || 'Option'}
+          </div>
+          <div className="col-md-6">
+            <strong>Execution Window:</strong> {strategy.start_time || '09:15'} - {strategy.end_time || '15:00'}
+          </div>
+          <div className="col-md-6">
+            <strong>Status:</strong> 
+            <span className={`badge ms-2 ${
+              strategy.status === 'running' ? 'bg-success' :
+              strategy.status === 'paused' ? 'bg-warning' :
+              strategy.status === 'error' ? 'bg-danger' :
+              'bg-secondary'
+            }`}>
+              {strategy.status || 'saved'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Strategy Logic */}
+      <div className="mb-4">
+        <h6 className="text-success mb-3">
+          <i className="bi bi-cpu me-2"></i>Strategy Logic
+        </h6>
+        <div className="card bg-light">
+          <div className="card-body">
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>{strategyInfo.logic}</pre>
+          </div>
+        </div>
+      </div>
+
+      {/* How It Works */}
+      <div className="mb-4">
+        <h6 className="text-info mb-3">
+          <i className="bi bi-gear me-2"></i>How It Works
+        </h6>
+        <p className="text-muted">{strategyInfo.howItWorks}</p>
+      </div>
+
+      {/* Risk Management */}
+      <div className="mb-4">
+        <h6 className="text-warning mb-3">
+          <i className="bi bi-shield-check me-2"></i>Risk Management
+        </h6>
+        <div className="row g-3">
+          <div className="col-md-3">
+            <div className="card border-warning">
+              <div className="card-body text-center">
+                <strong className="text-warning d-block">Stop Loss</strong>
+                <span className="fs-5">{strategy.stop_loss || 0}%</span>
+              </div>
+            </div>
+          </div>
+          <div className="col-md-3">
+            <div className="card border-success">
+              <div className="card-body text-center">
+                <strong className="text-success d-block">Target Profit</strong>
+                <span className="fs-5">{strategy.target_profit || 0}%</span>
+              </div>
+            </div>
+          </div>
+          <div className="col-md-3">
+            <div className="card border-info">
+              <div className="card-body text-center">
+                <strong className="text-info d-block">Trailing Stop</strong>
+                <span className="fs-5">{strategy.trailing_stop_loss || 0}%</span>
+              </div>
+            </div>
+          </div>
+          <div className="col-md-3">
+            <div className="card border-primary">
+              <div className="card-body text-center">
+                <strong className="text-primary d-block">Position Size</strong>
+                <span className="fs-5">{strategy.total_lot || 1} lot(s)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Custom Strategy Details */}
+      {strategy.strategy_type === 'custom' && (
+        <>
+          {/* Indicators */}
+          {indicators.length > 0 && (
+            <div className="mb-4">
+              <h6 className="text-primary mb-3">
+                <i className="bi bi-graph-up me-2"></i>Technical Indicators ({indicators.length})
+              </h6>
+              <div className="row g-2">
+                {indicators.map((indicator: any, idx: number) => (
+                  <div key={idx} className="col-md-6">
+                    <div className="card">
+                      <div className="card-body p-2">
+                        <strong>{indicator.name || indicator.id}</strong>
+                        {indicator.params && Object.keys(indicator.params).length > 0 && (
+                          <div className="small text-muted">
+                            Params: {Object.entries(indicator.params).map(([k, v]) => `${k}: ${v}`).join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Entry Rules */}
+          {entryRules.length > 0 && (
+            <div className="mb-4">
+              <h6 className="text-success mb-3">
+                <i className="bi bi-arrow-right-circle me-2"></i>Entry Rules ({entryRules.length})
+              </h6>
+              {entryRules.map((rule: any, idx: number) => (
+                <div key={idx} className="card mb-2 border-success">
+                  <div className="card-body">
+                    <strong>{rule.name || `Entry Rule ${idx + 1}`}</strong>
+                    {rule.conditions && rule.conditions.length > 0 && (
+                      <div className="mt-2">
+                        {rule.conditions.map((cond: any, cIdx: number) => (
+                          <div key={cIdx} className="small ms-3">
+                            {cIdx > 0 && <span className="badge bg-secondary me-1">{cond.logic || 'AND'}</span>}
+                            <span>{cond.indicator} {cond.operator} {cond.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Exit Rules */}
+          {exitRules.length > 0 && (
+            <div className="mb-4">
+              <h6 className="text-danger mb-3">
+                <i className="bi bi-arrow-left-circle me-2"></i>Exit Rules ({exitRules.length})
+              </h6>
+              {exitRules.map((rule: any, idx: number) => (
+                <div key={idx} className="card mb-2 border-danger">
+                  <div className="card-body">
+                    <strong>{rule.name || `Exit Rule ${idx + 1}`}</strong>
+                    {rule.conditions && rule.conditions.length > 0 && (
+                      <div className="mt-2">
+                        {rule.conditions.map((cond: any, cIdx: number) => (
+                          <div key={cIdx} className="small ms-3">
+                            {cIdx > 0 && <span className="badge bg-secondary me-1">{cond.logic || 'AND'}</span>}
+                            <span>{cond.indicator} {cond.operator} {cond.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Trading Parameters */}
+      <div className="mb-3">
+        <h6 className="text-secondary mb-3">
+          <i className="bi bi-sliders me-2"></i>Trading Parameters
+        </h6>
+        <div className="row g-2">
+          <div className="col-md-4">
+            <small><strong>Trade Type:</strong> {strategy.trade_type || 'Buy'}</small>
+          </div>
+          <div className="col-md-4">
+            <small><strong>Strike Price:</strong> {strategy.strike_price || 'ATM'}</small>
+          </div>
+          <div className="col-md-4">
+            <small><strong>Expiry:</strong> {strategy.expiry_type || 'Weekly'}</small>
+          </div>
+          <div className="col-md-4">
+            <small><strong>Candle Timeframe:</strong> {strategy.candle_time || '5'} min</small>
+          </div>
         </div>
       </div>
     </div>
@@ -701,9 +852,20 @@ interface DashboardContentProps {
 
 const DashboardContent: React.FC<DashboardContentProps> = ({ niftyPrice, bankNiftyPrice, balance, access_token, onViewLiveStrategy, onViewChart }) => {
   const [refreshStrategies, setRefreshStrategies] = useState<number>(0);
+  const [editingStrategy, setEditingStrategy] = useState<any>(null);
+  const [strategyBuilderOpen, setStrategyBuilderOpen] = useState<boolean>(false);
+  const [savedStrategiesOpen, setSavedStrategiesOpen] = useState<boolean>(false);
 
   const handleStrategySaved = () => {
     setRefreshStrategies(prev => prev + 1);
+    setEditingStrategy(null); // Reset editing state after save
+    // Auto-open saved strategies section
+    setSavedStrategiesOpen(true);
+  };
+
+  const handleEditStrategy = (strategy: any) => {
+    setEditingStrategy(strategy);
+    setStrategyBuilderOpen(true);
   };
 
   return (
@@ -715,8 +877,19 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ niftyPrice, bankNif
         </div>
         <div className="col-md-8">
           <div className="accordion" id="dashboardAccordion">
-            <StrategyConfiguration onStrategySaved={handleStrategySaved} />
-            <SavedStrategies onViewLive={onViewLiveStrategy} onStrategyUpdated={refreshStrategies} />
+            <StrategyConfiguration 
+              onStrategySaved={handleStrategySaved} 
+              editingStrategy={editingStrategy}
+              isOpen={strategyBuilderOpen}
+              onToggle={setStrategyBuilderOpen}
+            />
+            <SavedStrategies 
+              onViewLive={onViewLiveStrategy} 
+              onStrategyUpdated={refreshStrategies}
+              onEditStrategy={handleEditStrategy}
+              isOpen={savedStrategiesOpen}
+              onToggle={setSavedStrategiesOpen}
+            />
           </div>
           <LivePnL pnl={0} /> {/* P&L will be updated via WebSocket or API */}
           <ActiveTrade />
