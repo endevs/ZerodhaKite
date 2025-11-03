@@ -99,8 +99,9 @@ class Ticker:
 
         conn.close()
 
-        # Process ticks for strategies and emit updates
-        for unique_run_id, strategy_info in self.running_strategies.items():
+        # Process ticks for strategies and emit updates (iterate over a snapshot to avoid runtime errors
+        # if the dict is modified concurrently by pause/square-off actions)
+        for unique_run_id, strategy_info in list(self.running_strategies.items()):
             strategy_obj = strategy_info['strategy']
             db_id = strategy_info.get('db_id')
             user_id = strategy_info.get('user_id', 0)
@@ -118,7 +119,7 @@ class Ticker:
                     room_name = f"strategy_{user_id}_{db_id}"
                     strategy_status = strategy_obj.status if hasattr(strategy_obj, 'status') else {}
                     
-                    # Prepare metrics
+                    # Prepare comprehensive metrics including all strategy details
                     metrics = {
                         'currentPrice': strategy_status.get('current_price', strategy_status.get('current_ltp', 0)),
                         'entryPrice': strategy_status.get('entry_price', 0),
@@ -128,13 +129,99 @@ class Ticker:
                         'quantity': strategy_status.get('quantity', 0),
                         'status': strategy_status.get('state', 'running'),
                         'instrument': strategy_info.get('instrument', ''),
-                        'strategyName': strategy_info.get('name', '')
+                        'strategyName': strategy_info.get('name', ''),
+                        'option_prices': strategy_status.get('option_prices', {}),
+                        'option_symbols': strategy_status.get('option_symbols', {}),
+                        'traded_instrument': strategy_status.get('traded_instrument', ''),
+                        'traded_instrument_token': strategy_status.get('traded_instrument_token'),
+                        'audit_trail': strategy_status.get('audit_trail', [])[-50:],  # Last 50 entries
+                        # Mountain signal specific
+                        'signal_status': strategy_status.get('signal_status', ''),
+                        'signal_candle_time': strategy_status.get('signal_candle_time', 'N/A'),
+                        'signal_candle_high': strategy_status.get('signal_candle_high', 0),
+                        'signal_candle_low': strategy_status.get('signal_candle_low', 0),
+                        'entry_order_id': strategy_status.get('entry_order_id', 'N/A'),
+                        'sl_order_id': strategy_status.get('sl_order_id', 'N/A'),
+                        'tp_order_id': strategy_status.get('tp_order_id', 'N/A'),
+                        'stop_loss_level': strategy_status.get('stop_loss_level', 0),
+                        'target_profit_level': strategy_status.get('target_profit_level', 0),
+                        'paper_trade_mode': strategy_status.get('paper_trade_mode', False),
+                        'position': strategy_status.get('position', 0),
+                        'message': strategy_status.get('message', ''),
+                        # Prefer aligned execution time from strategy if available
+                        'last_execution_time': strategy_status.get('last_execution_time', datetime.datetime.now().isoformat())
                     }
+                    
+                    # Get historical candles if available (for charting)
+                    historical_candles = []
+                    if hasattr(strategy_obj, 'historical_data'):
+                        candles = getattr(strategy_obj, 'historical_data', [])
+                        for candle in candles[-50:]:  # Last 50 candles
+                            try:
+                                candle_date = candle.get('date') if isinstance(candle, dict) else getattr(candle, 'date', None)
+                                if candle_date:
+                                    if isinstance(candle_date, datetime.datetime):
+                                        date_str = candle_date.isoformat()
+                                    else:
+                                        date_str = str(candle_date)
+                                else:
+                                    date_str = datetime.datetime.now().isoformat()
+                                
+                                historical_candles.append({
+                                    'time': date_str,
+                                    'open': candle.get('open') if isinstance(candle, dict) else getattr(candle, 'open', 0),
+                                    'high': candle.get('high') if isinstance(candle, dict) else getattr(candle, 'high', 0),
+                                    'low': candle.get('low') if isinstance(candle, dict) else getattr(candle, 'low', 0),
+                                    'close': candle.get('close') if isinstance(candle, dict) else getattr(candle, 'close', 0),
+                                    'volume': candle.get('volume', 0) if isinstance(candle, dict) else getattr(candle, 'volume', 0)
+                                })
+                            except Exception as e:
+                                logging.debug(f"Error processing candle data: {e}")
+                                continue
+                    
+                    # Calculate 5 EMA if we have candles
+                    if len(historical_candles) > 0 and hasattr(strategy_obj, 'ema_period'):
+                        ema_period = getattr(strategy_obj, 'ema_period', 5)
+                        if len(historical_candles) >= ema_period:
+                            # Calculate EMA for last candles
+                            closes = [c['close'] for c in historical_candles]
+                            # Simple EMA calculation
+                            multiplier = 2 / (ema_period + 1)
+                            ema_values = []
+                            ema = closes[0]
+                            for close in closes:
+                                ema = (close - ema) * multiplier + ema
+                                ema_values.append(ema)
+                            
+                            # Add EMA to last candle
+                            if len(ema_values) > 0:
+                                for i, candle in enumerate(historical_candles):
+                                    if i < len(ema_values):
+                                        candle['ema5'] = ema_values[i]
+                    
+                    # Get signal candle info for CE/PE break lines
+                    signal_candle_high = strategy_status.get('signal_candle_high', 0)
+                    signal_candle_low = strategy_status.get('signal_candle_low', 0)
+                    position = strategy_status.get('position', 0)
+                    
+                    # Determine break levels
+                    pe_break_level = None
+                    ce_break_level = None
+                    if position == -1 and signal_candle_low > 0:  # PE position
+                        pe_break_level = signal_candle_low
+                    elif position == 1 and signal_candle_high > 0:  # CE position
+                        ce_break_level = signal_candle_high
                     
                     # Emit to strategy room
                     self.socketio.emit('strategy_update', {
                         'strategy_id': str(db_id),
                         'metrics': metrics,
+                        'historical_candles': historical_candles,
+                        'signal_candle_high': signal_candle_high,
+                        'signal_candle_low': signal_candle_low,
+                        'pe_break_level': pe_break_level,
+                        'ce_break_level': ce_break_level,
+                        'signal_history_today': strategy_status.get('signal_history_today', []),
                         'log': {
                             'timestamp': datetime.datetime.now().isoformat(),
                             'action': strategy_status.get('message', 'Processing'),

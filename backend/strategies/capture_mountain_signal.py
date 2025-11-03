@@ -87,6 +87,22 @@ class CaptureMountainSignal(BaseStrategy):
         self.target_hit_candles = 0 # For target profit logic
         self.option_instrument_tokens = {}  # Cache for option instrument tokens
         self.last_option_price_update = None  # Track when we last updated option prices
+        # Track all potential signals identified today
+        self.status['signal_history_today'] = []
+
+    def _aligned_execution_time(self, base_dt: datetime.datetime) -> datetime.datetime:
+        """Return the aligned execution time at minute % 5 == 4 and second == 40 for the candle window.
+        For a 5-minute candle starting at t0 (minute divisible by 5, second 0), execution time = t0 + 4m40s.
+        If current time is before the aligned time of current candle, use previous candle's aligned time.
+        """
+        # Determine candle start aligned to 5-minute
+        candle_minutes = (base_dt.minute // int(self.candle_time)) * int(self.candle_time)
+        candle_start = base_dt.replace(minute=candle_minutes, second=0, microsecond=0)
+        aligned = candle_start + datetime.timedelta(minutes=int(self.candle_time) - 1, seconds=40)
+        if base_dt < aligned:
+            prev_start = candle_start - datetime.timedelta(minutes=int(self.candle_time))
+            aligned = prev_start + datetime.timedelta(minutes=int(self.candle_time) - 1, seconds=40)
+        return aligned
 
     def _get_instrument_token(self):
         if self.instrument == 'NIFTY':
@@ -127,12 +143,17 @@ class CaptureMountainSignal(BaseStrategy):
                                    if inst['name'] == self.instrument and 
                                       inst['expiry'].strftime('%Y-%m-%d') == expiry_date_str]
             
-            # Find ATM strike
+            # Determine strike step and round ATM from index LTP (calculate signals on index)
+            strike_step = 50 if self.instrument == 'NIFTY' else 100
+            # Round to nearest step
+            atm_rounded = round(ltp / strike_step) * strike_step
+            
+            # Available strikes for selected expiry
             strike_prices = sorted(list(set([inst['strike'] for inst in filtered_instruments])))
             if not strike_prices:
                 return {}
-            
-            atm_strike = min(strike_prices, key=lambda x: abs(x - ltp))
+            # Choose nearest available to rounded ATM (prevents old far-away strikes like 46000)
+            atm_strike = min(strike_prices, key=lambda x: abs(x - atm_rounded))
             atm_strike_index = strike_prices.index(atm_strike)
             
             # Get ATM, ATM+2, ATM-2 strikes
@@ -397,6 +418,11 @@ class CaptureMountainSignal(BaseStrategy):
 
         # Update status message
         self.status['message'] = f"Processing ticks. Current candle: {self.current_candle_data['date'].strftime('%H:%M')} - {current_ltp:.2f}"
+        # Update aligned last execution time (minute % 5 == 4, second == 40)
+        try:
+            self.status['last_execution_time'] = self._aligned_execution_time(tick_datetime).isoformat()
+        except Exception:
+            pass
 
         # Only run strategy logic if we have enough historical data for EMA calculation
         if len(self.historical_data) > self.ema_period:
@@ -440,6 +466,20 @@ class CaptureMountainSignal(BaseStrategy):
                     'low': self.pe_signal_candle['low'],
                     'ema': previous_ema
                 })
+                # Append to today's signal history
+                try:
+                    signal_date = self.pe_signal_candle['date'] if isinstance(self.pe_signal_candle['date'], datetime.datetime) else None
+                    if signal_date and signal_date.date() == datetime.date.today():
+                        self.status['signal_history_today'].append({
+                            'type': 'PE',
+                            'time': self.status['signal_candle_time'],
+                            'high': self.pe_signal_candle['high'],
+                            'low': self.pe_signal_candle['low']
+                        })
+                        if len(self.status['signal_history_today']) > 200:
+                            self.status['signal_history_today'] = self.status['signal_history_today'][-200:]
+                except Exception:
+                    pass
                 logging.info(self.status['signal_status'])
 
         # CE Signal Candle Identification
@@ -460,6 +500,20 @@ class CaptureMountainSignal(BaseStrategy):
                     'low': self.ce_signal_candle['low'],
                     'ema': previous_ema
                 })
+                # Append to today's signal history
+                try:
+                    signal_date = self.ce_signal_candle['date'] if isinstance(self.ce_signal_candle['date'], datetime.datetime) else None
+                    if signal_date and signal_date.date() == datetime.date.today():
+                        self.status['signal_history_today'].append({
+                            'type': 'CE',
+                            'time': self.status['signal_candle_time'],
+                            'high': self.ce_signal_candle['high'],
+                            'low': self.ce_signal_candle['low']
+                        })
+                        if len(self.status['signal_history_today']) > 200:
+                            self.status['signal_history_today'] = self.status['signal_history_today'][-200:]
+                except Exception:
+                    pass
                 logging.info(self.status['signal_status'])
 
         # --- Trade Entry Logic ---

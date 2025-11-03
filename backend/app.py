@@ -1182,6 +1182,7 @@ def disconnect():
     except Exception as e:
         # Silently handle disconnect errors to prevent "write() before start_response"
         pass
+    return True
 
 from strategies.orb import ORB
 
@@ -1461,6 +1462,62 @@ def strategy_status(strategy_id):
                 status_data['strategy_name_display'] = running_strat_info.get('name', 'Unknown Strategy')
                 status_data['status'] = running_strat_info.get('status', 'running')
                 status_data['running'] = True
+                # Prefer aligned execution time from strategy if available
+                try:
+                    status_data['last_execution_time'] = strategy_obj.status.get('last_execution_time', datetime.datetime.now().isoformat())
+                except Exception:
+                    status_data['last_execution_time'] = datetime.datetime.now().isoformat()
+                
+                # Add historical candles if available
+                if hasattr(strategy_obj, 'historical_data'):
+                    candles = getattr(strategy_obj, 'historical_data', [])
+                    historical_candles = []
+                    for candle in candles[-50:]:  # Last 50 candles
+                        try:
+                            candle_date = candle.get('date') if isinstance(candle, dict) else getattr(candle, 'date', None)
+                            if candle_date:
+                                if isinstance(candle_date, datetime.datetime):
+                                    date_str = candle_date.isoformat()
+                                else:
+                                    date_str = str(candle_date)
+                            else:
+                                date_str = datetime.datetime.now().isoformat()
+                            
+                            candle_dict = {
+                                'time': date_str,
+                                'open': candle.get('open') if isinstance(candle, dict) else getattr(candle, 'open', 0),
+                                'high': candle.get('high') if isinstance(candle, dict) else getattr(candle, 'high', 0),
+                                'low': candle.get('low') if isinstance(candle, dict) else getattr(candle, 'low', 0),
+                                'close': candle.get('close') if isinstance(candle, dict) else getattr(candle, 'close', 0),
+                                'volume': candle.get('volume', 0) if isinstance(candle, dict) else getattr(candle, 'volume', 0)
+                            }
+                            historical_candles.append(candle_dict)
+                        except Exception as e:
+                            logging.debug(f"Error processing candle for status: {e}")
+                            continue
+                    
+                    # Calculate 5 EMA
+                    if len(historical_candles) > 0 and hasattr(strategy_obj, 'ema_period'):
+                        ema_period = getattr(strategy_obj, 'ema_period', 5)
+                        if len(historical_candles) >= ema_period:
+                            closes = [c['close'] for c in historical_candles]
+                            multiplier = 2 / (ema_period + 1)
+                            ema_values = []
+                            ema = closes[0]
+                            for close in closes:
+                                ema = (close - ema) * multiplier + ema
+                                ema_values.append(ema)
+                            
+                            for i, candle in enumerate(historical_candles):
+                                if i < len(ema_values):
+                                    candle['ema5'] = ema_values[i]
+                    
+                    status_data['historical_candles'] = historical_candles
+                # Include today's signal history for UI
+                try:
+                    status_data['signal_history_today'] = strategy_obj.status.get('signal_history_today', [])
+                except Exception:
+                    status_data['signal_history_today'] = []
                 return jsonify(status_data)
             except Exception as e:
                 logging.error(f"Error getting strategy status for {strategy_id}: {e}", exc_info=True)
@@ -1499,51 +1556,105 @@ def strategy_status(strategy_id):
 @socketio.on('subscribe_strategy')
 def handle_subscribe_strategy(data):
     """Subscribe to real-time updates for a specific strategy"""
-    if 'user_id' not in session:
-        emit('error', {'message': 'User not authenticated'})
-        return
-    
-    strategy_id = data.get('strategy_id')
-    if not strategy_id:
-        emit('error', {'message': 'Strategy ID required'})
-        return
-    
-    # Join a room for this strategy
-    from flask_socketio import join_room
-    room_name = f"strategy_{session['user_id']}_{strategy_id}"
-    join_room(room_name)
-    logging.info(f"User {session['user_id']} subscribed to strategy {strategy_id}")
-    emit('subscribed', {'strategy_id': str(strategy_id), 'message': 'Subscribed to strategy updates'})
+    try:
+        user_id = None
+        try:
+            user_id = session.get('user_id')
+        except Exception:
+            user_id = None
+        if not user_id:
+            try:
+                emit('error', {'message': 'User not authenticated'})
+            except Exception:
+                pass
+            return True
+
+        strategy_id = (data or {}).get('strategy_id')
+        if not strategy_id:
+            try:
+                emit('error', {'message': 'Strategy ID required'})
+            except Exception:
+                pass
+            return True
+
+        # Join a room for this strategy
+        from flask_socketio import join_room
+        room_name = f"strategy_{user_id}_{strategy_id}"
+        try:
+            join_room(room_name)
+        except Exception:
+            pass
+        try:
+            logging.info(f"User {user_id} subscribed to strategy {strategy_id}")
+        except Exception:
+            pass
+        try:
+            emit('subscribed', {'strategy_id': str(strategy_id), 'message': 'Subscribed to strategy updates'})
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return True
 
 @socketio.on('unsubscribe_strategy')
 def handle_unsubscribe_strategy(data):
     """Unsubscribe from strategy updates"""
     try:
-        if 'user_id' not in session:
-            return
-        
-        strategy_id = data.get('strategy_id')
+        user_id = None
+        try:
+            user_id = session.get('user_id')
+        except Exception:
+            user_id = None
+        if not user_id:
+            return True
+
+        strategy_id = (data or {}).get('strategy_id')
         if strategy_id:
             from flask_socketio import leave_room
-            room_name = f"strategy_{session['user_id']}_{strategy_id}"
-            leave_room(room_name)
-            logging.info(f"User {session['user_id']} unsubscribed from strategy {strategy_id}")
+            room_name = f"strategy_{user_id}_{strategy_id}"
+            try:
+                leave_room(room_name)
+            except Exception:
+                pass
+            try:
+                logging.info(f"User {user_id} unsubscribed from strategy {strategy_id}")
+            except Exception:
+                pass
+        return True
     except Exception as e:
         logging.debug(f"Error in unsubscribe_strategy: {e}")
-        pass  # Silently handle errors during disconnect
+        return True  # Silently handle errors during disconnect
 
 @socketio.on('subscribe_market_data')
 def handle_subscribe_market_data(data):
     """Subscribe to market data for strategy monitoring"""
-    if 'user_id' not in session:
-        emit('error', {'message': 'User not authenticated'})
-        return
-    
-    # Join market data room
-    from flask_socketio import join_room
-    room_name = f"market_data_{session['user_id']}"
-    join_room(room_name)
-    emit('subscribed', {'message': 'Subscribed to market data'})
+    try:
+        user_id = None
+        try:
+            user_id = session.get('user_id')
+        except Exception:
+            user_id = None
+        if not user_id:
+            try:
+                emit('error', {'message': 'User not authenticated'})
+            except Exception:
+                pass
+            return True
+
+        # Join market data room
+        from flask_socketio import join_room
+        room_name = f"market_data_{user_id}"
+        try:
+            join_room(room_name)
+        except Exception:
+            pass
+        try:
+            emit('subscribed', {'message': 'Subscribed to market data'})
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return True
 
 app.register_blueprint(chat_bp)
 
