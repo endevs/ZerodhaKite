@@ -760,11 +760,37 @@ def deploy_strategy(strategy_id):
         paper_trade = False
 
     # Check if strategy is already running
-    for unique_run_id, running_strat_info in running_strategies.items():
-        if running_strat_info['db_id'] == strategy_id and running_strat_info['status'] == 'running' and strategy_data['status'] != 'sq_off':
-            return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
+    # Remove from running_strategies if it exists but is not actually running
+    for unique_run_id, running_strat_info in list(running_strategies.items()):
+        if running_strat_info['db_id'] == strategy_id:
+            if running_strat_info['status'] == 'running' and strategy_data['status'] not in ['sq_off', 'paused']:
+                return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
+            else:
+                # Remove stale entries (paused, error, etc.) to allow redeployment
+                del running_strategies[unique_run_id]
+                logging.info(f"Removed stale strategy entry {unique_run_id} for strategy {strategy_id} before redeployment")
 
-    strategy_type = strategy_data['strategy_type']
+    # Access sqlite3.Row fields directly (they support dict-like access)
+    try:
+        strategy_type = strategy_data['strategy_type']
+    except (KeyError, IndexError):
+        strategy_type = None
+    
+    # Validate that strategy status allows deployment
+    try:
+        current_status = strategy_data['status']
+    except (KeyError, IndexError):
+        current_status = 'saved'
+    if current_status not in ['saved', 'paused', 'error', 'sq_off']:
+        if current_status == 'running':
+            return jsonify({'status': 'error', 'message': 'Strategy is already running'}), 400
+        else:
+            return jsonify({'status': 'error', 'message': f'Cannot deploy strategy with status: {current_status}'}), 400
+
+    # Validate strategy_type exists
+    if not strategy_type:
+        logging.error(f"Strategy {strategy_id} has no strategy_type")
+        return jsonify({'status': 'error', 'message': 'Strategy type not found. Please edit and save the strategy first.'}), 400
 
     try:
         strategy_class = None
@@ -773,7 +799,8 @@ def deploy_strategy(strategy_id):
         elif strategy_type == 'capture_mountain_signal':
             strategy_class = CaptureMountainSignal
         else:
-            return jsonify({'status': 'error', 'message': 'Unknown strategy'}), 400
+            logging.error(f"Unknown strategy type: {strategy_type} for strategy {strategy_id}")
+            return jsonify({'status': 'error', 'message': f'Unknown strategy type: {strategy_type}'}), 400
 
         # Instantiate the strategy with saved parameters
         strategy = strategy_class(
@@ -832,19 +859,47 @@ def pause_strategy(strategy_id):
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
     # Find the running strategy by its db_id
+    strategy_found_in_memory = False
     for unique_run_id, running_strat_info in running_strategies.items():
         if running_strat_info['db_id'] == strategy_id:
+            strategy_found_in_memory = True
             # Here you would implement logic to actually pause the strategy
             # For now, we just change its in-memory status
             running_strat_info['status'] = 'paused'
-            
-            # Update status in DB
-            conn = get_db_connection()
-            conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('paused', strategy_id))
-            conn.commit()
+            break
+    
+    # Update status in DB regardless of whether it's in memory or not
+    conn = get_db_connection()
+    try:
+        # Check if strategy exists and belongs to user
+        strategy_row = conn.execute(
+            'SELECT status FROM strategies WHERE id = ? AND user_id = ?',
+            (strategy_id, session['user_id'])
+        ).fetchone()
+        
+        if strategy_row is None:
             conn.close()
-            return jsonify({'status': 'success', 'message': 'Strategy paused successfully!'})
-    return jsonify({'status': 'error', 'message': 'Running strategy not found'}), 404
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+        
+        current_status = strategy_row['status']
+        
+        # Only allow pause if strategy is currently running
+        if current_status != 'running':
+            conn.close()
+            return jsonify({
+                'status': 'error', 
+                'message': f'Strategy is not running. Current status: {current_status}'
+            }), 400
+        
+        # Update status in DB to paused
+        conn.execute('UPDATE strategies SET status = ? WHERE id = ?', ('paused', strategy_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': 'Strategy paused successfully!'})
+    except Exception as e:
+        conn.close()
+        logging.error(f"Error pausing strategy {strategy_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error pausing strategy: {str(e)}'}), 500
 
 @app.route("/strategy/squareoff/<int:strategy_id>", methods=['POST'])
 @app.route("/api/strategy/squareoff/<int:strategy_id>", methods=['POST'])
@@ -990,65 +1045,143 @@ def backtest_strategy():
 def connect(auth=None):
     """Handle SocketIO connection"""
     global ticker
-    logging.info(f"SocketIO connection attempt - Session: user_id={session.get('user_id')}, access_token={'present' if session.get('access_token') else 'missing'}")
-    
-    # Always accept connection, but only initialize ticker if authenticated
+    # Delay logging to avoid "write() before start_response" - log after connection is established
+    user_id_from_session = None
+    access_token_from_session = None
+    access_token_present = False
     try:
-        if 'user_id' in session and 'access_token' in session:
+        user_id_from_session = session.get('user_id')
+        access_token_from_session = session.get('access_token')
+        access_token_present = bool(access_token_from_session)
+    except:
+        pass  # Silently handle session access errors during handshake
+    
+    # Always accept connection to avoid WebSocket errors - handle invalid tokens gracefully
+    try:
+        access_token_valid = False
+        if user_id_from_session and access_token_from_session:
             try:
-                kite.set_access_token(session['access_token'])
+                kite.set_access_token(access_token_from_session)
                 kite.profile()  # Validate the token
+                access_token_valid = True
             except Exception as e:
                 error_msg = str(e)
                 if "Invalid `api_key` or `access_token`" in error_msg or "Incorrect `api_key` or `access_token`" in error_msg:
-                    session.pop('access_token', None)
-                    logging.warning("SocketIO: Invalid access token")
-                    # Don't emit before returning False - SocketIO will handle rejection
-                    return False  # Reject connection
-                else:
-                    logging.error(f"SocketIO: Error validating token: {e}")
-                    # Don't emit before returning False
-                    return False
-
-            conn = get_db_connection()
-            user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
-            conn.close()
-
-            if user is None:
-                logging.error(f"SocketIO connect error: User with ID {session['user_id']} not found in DB.")
-                # Don't emit before returning False
-                return False
-
-            if user['app_key'] is None or session['access_token'] is None:
-                logging.warning(f"SocketIO connect warning: User {user['id']} has no app_key or access_token.")
-                emit('warning', {'message': 'Zerodha credentials not configured'})
-                # Still accept connection, just don't start ticker
-            else:
-                # Start ticker if not already started
-                if ticker is None:
                     try:
-                        ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
-                        ticker.start()
-                        logging.info("SocketIO: Ticker started successfully")
-                    except Exception as e:
-                        logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
-                        emit('error', {'message': 'Failed to start market data feed'})
+                        session.pop('access_token', None)
+                    except:
+                        pass  # Silently handle session errors
+                    # Delay logging to avoid write() before start_response
+                    try:
+                        logging.warning("SocketIO: Invalid access token - accepting connection but not starting ticker")
+                    except:
+                        pass
+                    # Accept connection but emit warning - don't start ticker
+                    try:
+                        emit('warning', {'message': 'Zerodha session expired. Please reconnect to Zerodha.'})
+                    except:
+                        pass  # If emit fails, connection is already established
+                else:
+                    # Delay logging to avoid write() before start_response
+                    try:
+                        logging.error(f"SocketIO: Error validating token: {e}")
+                    except:
+                        pass
+                    # Accept connection but emit error
+                    try:
+                        emit('error', {'message': 'Error validating Zerodha session'})
+                    except:
+                        pass
+
+            if access_token_valid:
+                conn = get_db_connection()
+                try:
+                    # Use cached user_id to avoid accessing session during handshake
+                    user_id = user_id_from_session
+                    if not user_id:
+                        conn.close()
+                        return True  # Accept connection but don't proceed
+                    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+                    if user is None:
+                        try:
+                            logging.error(f"SocketIO connect error: User with ID {user_id} not found in DB.")
+                        except:
+                            pass
+                        try:
+                            emit('error', {'message': 'User not found'})
+                        except:
+                            pass
+                    elif user['app_key'] is None or not access_token_present:
+                        try:
+                            logging.warning(f"SocketIO connect warning: User {user['id']} has no app_key or access_token.")
+                        except:
+                            pass
+                        try:
+                            emit('warning', {'message': 'Zerodha credentials not configured'})
+                        except:
+                            pass
+                    else:
+                        # Start ticker if not already started
+                        if ticker is None:
+                            try:
+                                # Use cached access_token to avoid session access during handshake
+                                if access_token_from_session:
+                                    ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
+                                    ticker.start()
+                                try:
+                                    logging.info("SocketIO: Ticker started successfully")
+                                except:
+                                    pass
+                            except Exception as e:
+                                try:
+                                    logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
+                                except:
+                                    pass  # Don't let logging errors break connection
+                                try:
+                                    emit('error', {'message': 'Failed to start market data feed'})
+                                except:
+                                    pass
+                finally:
+                    conn.close()
         else:
-            logging.info("SocketIO: Connected without authentication (no user_id or access_token in session)")
-            emit('info', {'message': 'Connected. Please log in to receive real-time market data.'})
+            try:
+                logging.info("SocketIO: Connected without authentication (no user_id or access_token in session)")
+            except:
+                pass  # Don't let logging errors break connection
+            try:
+                emit('info', {'message': 'Connected. Please log in to receive real-time market data.'})
+            except:
+                pass
         
         # Always emit connection success
-        emit('my_response', {'data': 'Connected'})
-        logging.info("SocketIO: Connection accepted")
-        return True  # Accept connection
+        try:
+            emit('my_response', {'data': 'Connected'})
+        except:
+            pass  # If emit fails, connection might still work
+        
+        # Log after connection is established to avoid "write() before start_response"
+        try:
+            logging.info(f"SocketIO: Connection accepted - Session: user_id={user_id_from_session}, access_token={'present' if access_token_present else 'missing'}")
+        except:
+            pass  # Don't let logging errors break the connection
+        
+        return True  # Always accept connection to avoid WebSocket errors
     except Exception as e:
-        logging.error(f"SocketIO connect error: {e}", exc_info=True)
-        # Don't emit before returning False - it causes "write() before start_response"
-        return False  # Reject connection on error
+        # Don't log with exc_info during handshake - it might cause write() errors
+        try:
+            logging.error(f"SocketIO connect error: {e}")
+        except:
+            pass  # Silently handle logging errors during handshake
+        # Always return True to avoid "write() before start_response" - errors are handled via emits
+        return True  # Accept connection even on error
 
 @socketio.on('disconnect')
 def disconnect():
-    logging.info('Client disconnected')
+    try:
+        logging.info('Client disconnected')
+    except Exception as e:
+        # Silently handle disconnect errors to prevent "write() before start_response"
+        pass
 
 from strategies.orb import ORB
 
@@ -1228,14 +1361,101 @@ def strategy_status(strategy_id):
         if running_strat_info.get('db_id') == strategy_id_int:
             try:
                 strategy_obj = running_strat_info.get('strategy')
+                status_data = {}
+                
                 if strategy_obj and hasattr(strategy_obj, 'status'):
                     status_dict = strategy_obj.status
                     if isinstance(status_dict, dict):
-                        status_data = status_dict.copy()
-                    else:
-                        status_data = dict(status_dict) if hasattr(status_dict, '__dict__') else {}
-                else:
-                    status_data = {}
+                        # Safely convert status dict to JSON-serializable format
+                        for key, value in status_dict.items():
+                            try:
+                                # Handle None first
+                                if value is None:
+                                    status_data[key] = None
+                                # Convert datetime objects to strings
+                                elif isinstance(value, datetime.datetime):
+                                    status_data[key] = value.isoformat()
+                                # Convert date objects to strings
+                                elif isinstance(value, datetime.date):
+                                    status_data[key] = value.isoformat()
+                                # Handle numpy types BEFORE basic types (np.float64 is not a regular float)
+                                elif hasattr(value, '__class__'):
+                                    try:
+                                        import numpy as np
+                                        if isinstance(value, (np.integer, np.floating)):
+                                            status_data[key] = None if np.isnan(value) else value.item()
+                                        elif hasattr(value, 'item'):
+                                            status_data[key] = value.item()
+                                        elif isinstance(value, dict):
+                                            # Nested dict
+                                            status_data[key] = {}
+                                            for k, v in value.items():
+                                                if isinstance(v, (datetime.datetime, datetime.date)):
+                                                    status_data[key][k] = v.isoformat()
+                                                elif hasattr(v, '__class__'):
+                                                    try:
+                                                        if isinstance(v, (np.integer, np.floating)):
+                                                            status_data[key][k] = None if np.isnan(v) else v.item()
+                                                        elif hasattr(v, 'item'):
+                                                            status_data[key][k] = v.item()
+                                                        else:
+                                                            status_data[key][k] = str(v) if v is not None else None
+                                                    except:
+                                                        status_data[key][k] = str(v) if v is not None else None
+                                                else:
+                                                    status_data[key][k] = v
+                                        elif isinstance(value, list):
+                                            # List with numpy items
+                                            processed_list = []
+                                            for item in value:
+                                                if isinstance(item, (datetime.datetime, datetime.date)):
+                                                    processed_list.append(item.isoformat())
+                                                elif hasattr(item, '__class__'):
+                                                    try:
+                                                        if isinstance(item, (np.integer, np.floating)):
+                                                            processed_list.append(None if np.isnan(item) else item.item())
+                                                        elif hasattr(item, 'item'):
+                                                            processed_list.append(item.item())
+                                                        else:
+                                                            processed_list.append(str(item))
+                                                    except:
+                                                        processed_list.append(str(item) if item is not None else None)
+                                                else:
+                                                    processed_list.append(item)
+                                            status_data[key] = processed_list
+                                        else:
+                                            status_data[key] = str(value) if value is not None else None
+                                    except Exception as conv_err:
+                                        logging.debug(f"Could not convert value for key '{key}': {conv_err}")
+                                        status_data[key] = None
+                                # Handle basic JSON-serializable types
+                                elif isinstance(value, (bool, str)):
+                                    status_data[key] = value
+                                elif isinstance(value, int):
+                                    status_data[key] = value
+                                elif isinstance(value, float):
+                                    # Check for NaN
+                                    if value != value:  # NaN check
+                                        status_data[key] = None
+                                    else:
+                                        status_data[key] = value
+                                # Handle nested dicts (non-numpy)
+                                elif isinstance(value, dict):
+                                    status_data[key] = {k: (v.isoformat() if isinstance(v, (datetime.datetime, datetime.date)) else v) 
+                                                       for k, v in value.items()}
+                                # Handle lists (non-numpy)
+                                elif isinstance(value, list):
+                                    status_data[key] = [item.isoformat() if isinstance(item, (datetime.datetime, datetime.date)) else item 
+                                                       for item in value]
+                                # For unknown types, try string conversion or skip
+                                else:
+                                    try:
+                                        status_data[key] = str(value) if value is not None else None
+                                    except:
+                                        pass  # Skip if can't convert
+                            except Exception as e:
+                                logging.warning(f"Error serializing status key '{key}': {e}")
+                                continue
                 
                 status_data['strategy_type'] = running_strat_info.get('strategy_type', 'unknown')
                 status_data['strategy_name_display'] = running_strat_info.get('name', 'Unknown Strategy')
@@ -1298,15 +1518,19 @@ def handle_subscribe_strategy(data):
 @socketio.on('unsubscribe_strategy')
 def handle_unsubscribe_strategy(data):
     """Unsubscribe from strategy updates"""
-    if 'user_id' not in session:
-        return
-    
-    strategy_id = data.get('strategy_id')
-    if strategy_id:
-        from flask_socketio import leave_room
-        room_name = f"strategy_{session['user_id']}_{strategy_id}"
-        leave_room(room_name)
-        logging.info(f"User {session['user_id']} unsubscribed from strategy {strategy_id}")
+    try:
+        if 'user_id' not in session:
+            return
+        
+        strategy_id = data.get('strategy_id')
+        if strategy_id:
+            from flask_socketio import leave_room
+            room_name = f"strategy_{session['user_id']}_{strategy_id}"
+            leave_room(room_name)
+            logging.info(f"User {session['user_id']} unsubscribed from strategy {strategy_id}")
+    except Exception as e:
+        logging.debug(f"Error in unsubscribe_strategy: {e}")
+        pass  # Silently handle errors during disconnect
 
 @socketio.on('subscribe_market_data')
 def handle_subscribe_market_data(data):

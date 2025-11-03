@@ -1,4 +1,5 @@
 from .base_strategy import BaseStrategy
+from utils.kite_utils import get_option_symbols
 import logging
 import datetime
 import pandas as pd
@@ -59,11 +60,33 @@ class CaptureMountainSignal(BaseStrategy):
             'sl_order_id': 'N/A',
             'tp_order_id': 'N/A',
             'trade_history': self.trade_history,
-            'candle_time_frame': self.candle_time
+            'candle_time_frame': self.candle_time,
+            # Option prices for monitoring (ATM, ATM+2, ATM-2)
+            'option_prices': {
+                'atm_ce': None,
+                'atm_pe': None,
+                'atm_plus2_ce': None,
+                'atm_plus2_pe': None,
+                'atm_minus2_ce': None,
+                'atm_minus2_pe': None
+            },
+            'option_symbols': {
+                'atm_ce': None,
+                'atm_pe': None,
+                'atm_plus2_ce': None,
+                'atm_plus2_pe': None,
+                'atm_minus2_ce': None,
+                'atm_minus2_pe': None
+            },
+            'traded_instrument_token': None,
+            # Audit trail
+            'audit_trail': []
         }
         self.last_candle_timestamp = None
         self.current_candle_data = None
         self.target_hit_candles = 0 # For target profit logic
+        self.option_instrument_tokens = {}  # Cache for option instrument tokens
+        self.last_option_price_update = None  # Track when we last updated option prices
 
     def _get_instrument_token(self):
         if self.instrument == 'NIFTY':
@@ -72,24 +95,232 @@ class CaptureMountainSignal(BaseStrategy):
             return 260105
         return None
 
+    def _get_option_instruments_for_monitoring(self, ltp):
+        """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)"""
+        try:
+            instruments = self.kite.instruments('NFO')
+            
+            # Find expiry date
+            all_expiries = sorted(list(set([
+                inst['expiry'] for inst in instruments 
+                if inst['name'] == self.instrument and 'expiry' in inst and inst['expiry']
+            ])))
+            
+            today = datetime.date.today()
+            if self.expiry_type == 'weekly':
+                expiry_date = next((d for d in all_expiries if d > today), None)
+            elif self.expiry_type == 'next_weekly':
+                expiries_after_today = [d for d in all_expiries if d > today]
+                expiry_date = expiries_after_today[1] if len(expiries_after_today) > 1 else None
+            elif self.expiry_type == 'monthly':
+                expiry_date = next((d for d in all_expiries if (d - today).days >= 20), None)
+            else:
+                expiry_date = None
+            
+            if not expiry_date:
+                return {}
+            
+            expiry_date_str = expiry_date.strftime('%Y-%m-%d')
+            
+            # Filter instruments by expiry
+            filtered_instruments = [inst for inst in instruments 
+                                   if inst['name'] == self.instrument and 
+                                      inst['expiry'].strftime('%Y-%m-%d') == expiry_date_str]
+            
+            # Find ATM strike
+            strike_prices = sorted(list(set([inst['strike'] for inst in filtered_instruments])))
+            if not strike_prices:
+                return {}
+            
+            atm_strike = min(strike_prices, key=lambda x: abs(x - ltp))
+            atm_strike_index = strike_prices.index(atm_strike)
+            
+            # Get ATM, ATM+2, ATM-2 strikes
+            atm_minus2_index = max(0, atm_strike_index - 2)
+            atm_plus2_index = min(len(strike_prices) - 1, atm_strike_index + 2)
+            
+            atm_strike_val = strike_prices[atm_strike_index]
+            atm_minus2_strike = strike_prices[atm_minus2_index]
+            atm_plus2_strike = strike_prices[atm_plus2_index]
+            
+            # Find instruments for each strike and option type
+            option_data = {}
+            for inst in filtered_instruments:
+                strike = inst['strike']
+                option_type = inst['instrument_type']
+                
+                if strike == atm_strike_val:
+                    if option_type == 'CE':
+                        option_data['atm_ce'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+                    elif option_type == 'PE':
+                        option_data['atm_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+                elif strike == atm_minus2_strike:
+                    if option_type == 'CE':
+                        option_data['atm_minus2_ce'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+                    elif option_type == 'PE':
+                        option_data['atm_minus2_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+                elif strike == atm_plus2_strike:
+                    if option_type == 'CE':
+                        option_data['atm_plus2_ce'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+                    elif option_type == 'PE':
+                        option_data['atm_plus2_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
+            
+            return option_data
+        except Exception as e:
+            logging.error(f"Error getting option instruments for monitoring: {e}", exc_info=True)
+            return {}
+    
+    def _update_option_prices(self):
+        """Fetch and update option prices (ATM, ATM+2, ATM-2) from Kite API"""
+        try:
+            current_ltp = self.status.get('current_ltp', 0)
+            if current_ltp == 0:
+                return
+            
+            # Get option instruments (cache if not already cached or if LTP changed significantly)
+            if not self.option_instrument_tokens or (self.last_option_price_update is None or 
+                                                    (datetime.datetime.now() - self.last_option_price_update).total_seconds() > 300):
+                self.option_instrument_tokens = self._get_option_instruments_for_monitoring(current_ltp)
+                self.last_option_price_update = datetime.datetime.now()
+            
+            if not self.option_instrument_tokens:
+                return
+            
+            # Prepare list of tokens to fetch
+            tokens_to_fetch = []
+            for key in ['atm_ce', 'atm_pe', 'atm_plus2_ce', 'atm_plus2_pe', 'atm_minus2_ce', 'atm_minus2_pe']:
+                if key in self.option_instrument_tokens:
+                    tokens_to_fetch.append(self.option_instrument_tokens[key]['token'])
+            
+            if not tokens_to_fetch:
+                return
+            
+            # Fetch LTP for all option tokens at once
+            ltp_response = self.kite.ltp(tokens_to_fetch)
+            
+            # Update option prices and symbols in status
+            for key in ['atm_ce', 'atm_pe', 'atm_plus2_ce', 'atm_plus2_pe', 'atm_minus2_ce', 'atm_minus2_pe']:
+                if key in self.option_instrument_tokens:
+                    token = self.option_instrument_tokens[key]['token']
+                    if token in ltp_response:
+                        self.status['option_prices'][key] = ltp_response[token]['last_price']
+                        self.status['option_symbols'][key] = self.option_instrument_tokens[key]['symbol']
+                    else:
+                        self.status['option_prices'][key] = None
+                        self.status['option_symbols'][key] = self.option_instrument_tokens[key]['symbol']
+        except Exception as e:
+            logging.error(f"Error updating option prices: {e}", exc_info=True)
+    
+    def _add_audit_trail(self, event_type, message, data=None):
+        """Add entry to audit trail for strategy behavior tracking"""
+        try:
+            audit_entry = {
+                'timestamp': datetime.datetime.now().isoformat(),
+                'event_type': event_type,  # 'signal_identified', 'entry', 'exit', 'stop_loss', 'target_hit', 'signal_reset', etc.
+                'message': message,
+                'data': data or {}
+            }
+            self.status['audit_trail'].append(audit_entry)
+            
+            # Keep only last 1000 audit entries
+            if len(self.status['audit_trail']) > 1000:
+                self.status['audit_trail'] = self.status['audit_trail'][-1000:]
+            
+            logging.info(f"[AUDIT] {event_type}: {message}")
+        except Exception as e:
+            logging.error(f"Error adding audit trail: {e}", exc_info=True)
+    
     def _get_atm_option_symbol(self, ltp, option_type):
-        # This is a placeholder. In a real scenario, you'd fetch actual ATM options.
-        # For simplicity, we'll just return a dummy symbol.
-        return f'{self.instrument}{option_type}{ltp}'
+        """Get ATM option symbol and instrument token for trading"""
+        try:
+            # Get option symbols for ATM +/- 2 strikes
+            option_tokens = get_option_symbols(self.kite, self.instrument, self.expiry_type, 2)
+            if not option_tokens:
+                logging.warning(f"Could not fetch option symbols for {self.instrument}")
+                return None, None
+            
+            # Get all instruments to find the trading symbol
+            instruments = self.kite.instruments('NFO')
+            
+            # Find expiry date
+            all_expiries = sorted(list(set([
+                inst['expiry'] for inst in instruments 
+                if inst['name'] == self.instrument and 'expiry' in inst and inst['expiry']
+            ])))
+            
+            today = datetime.date.today()
+            expiry_type_lower = self.expiry_type.lower() if self.expiry_type else ''
+            
+            if expiry_type_lower == 'weekly':
+                # Find the first expiry after today
+                expiries_after_today = [d for d in all_expiries if d > today]
+                expiry_date = expiries_after_today[0] if len(expiries_after_today) > 0 else None
+                # If no expiry after today, try to get today's expiry or next available
+                if not expiry_date:
+                    expiry_date = next((d for d in all_expiries if d >= today), None)
+            elif expiry_type_lower == 'next_weekly':
+                # Find the second expiry after today
+                expiries_after_today = [d for d in all_expiries if d > today]
+                expiry_date = expiries_after_today[1] if len(expiries_after_today) > 1 else None
+                # Fallback to first expiry if second doesn't exist
+                if not expiry_date and len(expiries_after_today) > 0:
+                    expiry_date = expiries_after_today[0]
+            elif expiry_type_lower == 'monthly':
+                # Find the next expiry that is at least 20 days away
+                expiry_date = next((d for d in all_expiries if (d - today).days >= 20), None)
+                # Fallback to furthest expiry if no monthly expiry found
+                if not expiry_date and len(all_expiries) > 0:
+                    expiry_date = max(all_expiries)
+            else:
+                expiry_date = None
+            
+            if not expiry_date:
+                logging.warning(f"Could not find expiry date for {self.instrument} {self.expiry_type}. Available expiries: {all_expiries[:5] if len(all_expiries) > 0 else 'none'}")
+                return None, None
+            
+            expiry_date_str = expiry_date.strftime('%Y-%m-%d')
+            
+            # Filter instruments by expiry and option type
+            filtered_instruments = [inst for inst in instruments 
+                                 if inst['name'] == self.instrument and 
+                                    inst['instrument_type'] == option_type and
+                                    inst['expiry'].strftime('%Y-%m-%d') == expiry_date_str]
+            
+            # Find ATM strike
+            strike_prices = [inst['strike'] for inst in filtered_instruments]
+            if not strike_prices:
+                logging.warning(f"No strike prices found for {self.instrument} {option_type}")
+                return None, None
+            
+            atm_strike = min(strike_prices, key=lambda x: abs(x - ltp))
+            
+            # Find the trading symbol and instrument token
+            for inst in filtered_instruments:
+                if inst['strike'] == atm_strike:
+                    return inst['tradingsymbol'], inst['instrument_token']
+            
+            return None, None
+        except Exception as e:
+            logging.error(f"Error fetching ATM option symbol: {e}", exc_info=True)
+            return None, None
 
     def _place_order(self, ltp, option_type, transaction_type):
-        trading_symbol = self._get_atm_option_symbol(ltp, option_type)
+        trading_symbol, instrument_token = self._get_atm_option_symbol(ltp, option_type)
+        if not trading_symbol or not instrument_token:
+            logging.error(f"Could not get trading symbol for {option_type} at LTP {ltp}")
+            return None, None, None
+        
         quantity = self.total_lot * 50 # Assuming 1 lot = 50 shares
         order_id = str(uuid.uuid4())[:8]
 
         if self.paper_trade:
-            logging.info(f"[PAPER TRADE] Simulating {transaction_type} order for {trading_symbol} with quantity {quantity}")
-            return order_id, trading_symbol
+            logging.info(f"[PAPER TRADE] Simulating {transaction_type} order for {trading_symbol} (token: {instrument_token}) with quantity {quantity}")
+            return order_id, trading_symbol, instrument_token
         else:
-            logging.info(f"Placing LIVE {transaction_type} order for {trading_symbol} with quantity {quantity}")
+            logging.info(f"Placing LIVE {transaction_type} order for {trading_symbol} (token: {instrument_token}) with quantity {quantity}")
             # Actual KiteConnect order placement would go here
             # order_id = self.kite.place_order(...)
-            return order_id, trading_symbol
+            return order_id, trading_symbol, instrument_token
 
     def run(self):
         logging.info(f"Running Capture Mountain Signal strategy for {self.instrument}")
@@ -117,6 +348,11 @@ class CaptureMountainSignal(BaseStrategy):
             return
 
         self.status['current_ltp'] = current_ltp
+        
+        # Update option prices (every 5 seconds to avoid too many API calls)
+        if self.last_option_price_update is None or \
+           (datetime.datetime.now() - self.last_option_price_update).total_seconds() >= 5:
+            self._update_option_prices()
 
         # Convert tick_timestamp to datetime object if it's not already
         if isinstance(tick_timestamp, (int, float)):
@@ -197,6 +433,13 @@ class CaptureMountainSignal(BaseStrategy):
                 self.status['signal_candle_high'] = self.pe_signal_candle['high']
                 self.status['signal_candle_low'] = self.pe_signal_candle['low']
                 self.ce_signal_candle = None # Only one active signal type
+                self._add_audit_trail('signal_identified', self.status['signal_status'], {
+                    'signal_type': 'PE',
+                    'candle_time': self.status['signal_candle_time'],
+                    'high': self.pe_signal_candle['high'],
+                    'low': self.pe_signal_candle['low'],
+                    'ema': previous_ema
+                })
                 logging.info(self.status['signal_status'])
 
         # CE Signal Candle Identification
@@ -210,6 +453,13 @@ class CaptureMountainSignal(BaseStrategy):
                 self.status['signal_candle_high'] = self.ce_signal_candle['high']
                 self.status['signal_candle_low'] = self.ce_signal_candle['low']
                 self.pe_signal_candle = None # Only one active signal type
+                self._add_audit_trail('signal_identified', self.status['signal_status'], {
+                    'signal_type': 'CE',
+                    'candle_time': self.status['signal_candle_time'],
+                    'high': self.ce_signal_candle['high'],
+                    'low': self.ce_signal_candle['low'],
+                    'ema': previous_ema
+                })
                 logging.info(self.status['signal_status'])
 
         # --- Trade Entry Logic ---
@@ -220,10 +470,16 @@ class CaptureMountainSignal(BaseStrategy):
                 self.entry_price = current_candle['close']
                 self.trade_placed = True
                 self.status['state'] = 'position_open'
-                self.status['traded_instrument'] = self._get_atm_option_symbol(self.entry_price, 'PE')
-                self.status['stop_loss_level'] = self.pe_signal_candle['high'] # SL for PE is signal candle high
-                self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                order_id, _ = self._place_order(self.entry_price, 'PE', 'BUY')
+                trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'PE')
+                if trading_symbol and instrument_token:
+                    self.status['traded_instrument'] = trading_symbol
+                    self.status['traded_instrument_token'] = instrument_token
+                    self.status['stop_loss_level'] = self.pe_signal_candle['high'] # SL for PE is signal candle high
+                    self.status['target_profit_level'] = np.nan # Target calculated dynamically
+                    order_id, _, _ = self._place_order(self.entry_price, 'PE', 'BUY')
+                else:
+                    logging.error("Could not get trading symbol for PE trade")
+                    return
                 self.status['entry_order_id'] = order_id
                 self.status['message'] = f"PE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
                 self.trade_history.append({
@@ -231,6 +487,15 @@ class CaptureMountainSignal(BaseStrategy):
                     'action': 'BUY PE',
                     'price': self.entry_price,
                     'instrument': self.status['traded_instrument'],
+                    'order_id': order_id
+                })
+                self._add_audit_trail('entry', self.status['message'], {
+                    'option_type': 'PE',
+                    'entry_price': self.entry_price,
+                    'stop_loss': self.status['stop_loss_level'],
+                    'signal_candle_high': self.pe_signal_candle['high'],
+                    'signal_candle_low': self.pe_signal_candle['low'],
+                    'instrument': trading_symbol,
                     'order_id': order_id
                 })
                 logging.info(self.status['message'])
@@ -241,10 +506,16 @@ class CaptureMountainSignal(BaseStrategy):
                 self.entry_price = current_candle['close']
                 self.trade_placed = True
                 self.status['state'] = 'position_open'
-                self.status['traded_instrument'] = self._get_atm_option_symbol(self.entry_price, 'CE')
-                self.status['stop_loss_level'] = self.ce_signal_candle['low'] # SL for CE is signal candle low
-                self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                order_id, _ = self._place_order(self.entry_price, 'CE', 'BUY')
+                trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'CE')
+                if trading_symbol and instrument_token:
+                    self.status['traded_instrument'] = trading_symbol
+                    self.status['traded_instrument_token'] = instrument_token
+                    self.status['stop_loss_level'] = self.ce_signal_candle['low'] # SL for CE is signal candle low
+                    self.status['target_profit_level'] = np.nan # Target calculated dynamically
+                    order_id, _, _ = self._place_order(self.entry_price, 'CE', 'BUY')
+                else:
+                    logging.error("Could not get trading symbol for CE trade")
+                    return
                 self.status['entry_order_id'] = order_id
                 self.status['message'] = f"CE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
                 self.trade_history.append({
@@ -252,6 +523,15 @@ class CaptureMountainSignal(BaseStrategy):
                     'action': 'BUY CE',
                     'price': self.entry_price,
                     'instrument': self.status['traded_instrument'],
+                    'order_id': order_id
+                })
+                self._add_audit_trail('entry', self.status['message'], {
+                    'option_type': 'CE',
+                    'entry_price': self.entry_price,
+                    'stop_loss': self.status['stop_loss_level'],
+                    'signal_candle_high': self.ce_signal_candle['high'],
+                    'signal_candle_low': self.ce_signal_candle['low'],
+                    'instrument': trading_symbol,
                     'order_id': order_id
                 })
                 logging.info(self.status['message'])
@@ -266,6 +546,12 @@ class CaptureMountainSignal(BaseStrategy):
             if (self.position == 1 and current_candle['close'] <= self.status['stop_loss_level']) or \
                (self.position == -1 and current_candle['close'] >= self.status['stop_loss_level']):
                 self.exit_price = current_candle['close']
+                self._add_audit_trail('stop_loss', f"Stop Loss hit at {self.exit_price:.2f}", {
+                    'exit_price': self.exit_price,
+                    'entry_price': self.entry_price,
+                    'pnl': self.status['pnl'],
+                    'position': 'CE' if self.position == 1 else 'PE'
+                })
                 self._close_trade('SL', current_candle['date'])
                 logging.info(self.status['message'])
 
@@ -280,6 +566,12 @@ class CaptureMountainSignal(BaseStrategy):
                     # Then if 2 consecutive candles CLOSE > 5 EMA -> Exit PE trade
                     if len(df) >= 3 and df.iloc[-1]['close'] > df.iloc[-1]['ema'] and df.iloc[-2]['close'] > df.iloc[-2]['ema']:
                         self.exit_price = current_candle['close']
+                        self._add_audit_trail('target_hit', f"Target Profit hit at {self.exit_price:.2f} (PE)", {
+                            'exit_price': self.exit_price,
+                            'entry_price': self.entry_price,
+                            'pnl': self.status['pnl'],
+                            'target_candles': self.target_hit_candles
+                        })
                         self._close_trade('TP', current_candle['date'])
                         logging.info(self.status['message'])
 
@@ -294,6 +586,12 @@ class CaptureMountainSignal(BaseStrategy):
                     # Then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade
                     if len(df) >= 3 and df.iloc[-1]['close'] < df.iloc[-1]['ema'] and df.iloc[-2]['close'] < df.iloc[-2]['ema']:
                         self.exit_price = current_candle['close']
+                        self._add_audit_trail('target_hit', f"Target Profit hit at {self.exit_price:.2f} (CE)", {
+                            'exit_price': self.exit_price,
+                            'entry_price': self.entry_price,
+                            'pnl': self.status['pnl'],
+                            'target_candles': self.target_hit_candles
+                        })
                         self._close_trade('TP', current_candle['date'])
                         logging.info(self.status['message'])
 
@@ -301,7 +599,7 @@ class CaptureMountainSignal(BaseStrategy):
         self.status['state'] = 'position_closed'
         self.status['message'] = f"Position closed by {exit_type} at {self.exit_price:.2f}. P&L: {self.status['pnl']:.2f}"
         
-        order_id, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
+        order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
         if exit_type == 'SL':
             self.status['sl_order_id'] = order_id
         elif exit_type == 'TP':
@@ -314,6 +612,16 @@ class CaptureMountainSignal(BaseStrategy):
             'instrument': self.status['traded_instrument'],
             'order_id': order_id
         })
+        
+        self._add_audit_trail('exit', self.status['message'], {
+            'exit_type': exit_type,
+            'exit_price': self.exit_price,
+            'entry_price': self.entry_price,
+            'pnl': self.status['pnl'],
+            'order_id': order_id,
+            'position': 'PE' if self.position == -1 else 'CE'
+        })
+        
         self.position = 0
         self.trade_placed = False
         self.pe_signal_candle = None

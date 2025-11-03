@@ -103,9 +103,10 @@ interface SavedStrategiesProps {
   onEditStrategy?: (strategy: Strategy) => void;
   isOpen?: boolean;
   onToggle?: (open: boolean) => void;
+  refreshTrigger?: () => void; // Optional manual refresh trigger
 }
 
-const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrategyUpdated, onEditStrategy, isOpen = false, onToggle }) => {
+const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrategyUpdated, onEditStrategy, isOpen = false, onToggle, refreshTrigger }) => {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedStrategyInfo, setSelectedStrategyInfo] = useState<Strategy | null>(null);
   const [showStrategyInfoModal, setShowStrategyInfoModal] = useState<boolean>(false);
@@ -124,9 +125,30 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
     }
   };
 
+  // Expose fetchStrategies to parent via useImperativeHandle or callback
+  React.useEffect(() => {
+    if (refreshTrigger) {
+      // Store the refresh function reference (if we need to expose it)
+    }
+  }, [refreshTrigger]);
+
   useEffect(() => {
     fetchStrategies();
   }, [onStrategyUpdated]); // Re-fetch when onStrategyUpdated is called
+  
+  // Also listen to window events or custom events for refresh
+  useEffect(() => {
+    const handleRefresh = () => {
+      fetchStrategies();
+    };
+    
+    // Listen for custom refresh event
+    window.addEventListener('refreshStrategies', handleRefresh);
+    
+    return () => {
+      window.removeEventListener('refreshStrategies', handleRefresh);
+    };
+  }, []);
   
   // Also fetch on initial load and when the section is expanded
   useEffect(() => {
@@ -238,17 +260,33 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
 
   const handlePauseStrategy = async (strategyId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/strategy/pause/${strategyId}`, { method: 'POST', credentials: 'include' });
-      const data = await response.json();
-      if (response.ok) {
-        alert(data.message);
-        fetchStrategies();
+      const response = await fetch(`http://localhost:8000/api/strategy/pause/${strategyId}`, { 
+        method: 'POST', 
+        credentials: 'include' 
+      });
+      
+      let data;
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
       } else {
-        alert('Error: ' + data.message);
+        const text = await response.text();
+        console.error('Non-JSON response from pause:', text);
+        alert(`Error pausing strategy: ${response.status} ${response.statusText}`);
+        return;
       }
-    } catch (error) {
+      
+      if (response.ok) {
+        alert(data.message || 'Strategy paused successfully!');
+        fetchStrategies();
+        // Trigger refresh for Saved Strategies
+        window.dispatchEvent(new CustomEvent('refreshStrategies'));
+      } else {
+        alert('Error: ' + (data.message || 'Failed to pause strategy'));
+      }
+    } catch (error: any) {
       console.error('Error pausing strategy:', error);
-      alert('An error occurred while pausing the strategy.');
+      alert(`An error occurred while pausing the strategy: ${error.message || 'Unknown error'}`);
     }
   };
 
@@ -365,35 +403,19 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
                           <button 
                             className="btn btn-sm btn-success" 
                             onClick={() => handleDeployStrategy(strategy.id)}
-                            title="Deploy Strategy"
+                            title="Deploy/Play Strategy"
                           >
                             <i className="bi bi-play-fill"></i>
                           </button>
                         )}
                         {strategy.status === 'running' && (
-                          <>
-                            <button 
-                              className="btn btn-sm btn-warning" 
-                              onClick={() => handlePauseStrategy(strategy.id)}
-                              title="Pause Strategy"
-                            >
-                              <i className="bi bi-pause-fill"></i>
-                            </button>
-                            <button 
-                              className="btn btn-sm btn-danger" 
-                              onClick={() => handleSquareOffStrategy(strategy.id)}
-                              title="Square Off"
-                            >
-                              <i className="bi bi-x-circle"></i>
-                            </button>
-                            <button 
-                              className="btn btn-sm btn-primary" 
-                              onClick={() => onViewLive(strategy.id)}
-                              title="View Live Monitoring"
-                            >
-                              <i className="bi bi-activity"></i>
-                            </button>
-                          </>
+                          <button 
+                            className="btn btn-sm btn-warning" 
+                            onClick={() => handlePauseStrategy(strategy.id)}
+                            title="Pause Strategy"
+                          >
+                            <i className="bi bi-pause-fill"></i>
+                          </button>
                         )}
                         <button 
                           className="btn btn-sm btn-danger" 
@@ -773,7 +795,12 @@ const ActiveTrade: React.FC = () => {
   );
 };
 
-const RunningStrategies: React.FC = () => {
+interface RunningStrategiesProps {
+  onViewLive: (strategyId: string) => void;
+  onStrategyAction?: () => void; // Callback to refresh Saved Strategies when actions occur
+}
+
+const RunningStrategies: React.FC<RunningStrategiesProps> = ({ onViewLive, onStrategyAction }) => {
   const [runningStrategies, setRunningStrategies] = useState<any[]>([]); // Define a proper interface for running strategies
 
   useEffect(() => {
@@ -798,38 +825,135 @@ const RunningStrategies: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  const handlePauseStrategy = async (strategyId: string) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/strategy/pause/${strategyId}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(data.message || 'Strategy paused successfully!');
+        // Refresh the running strategies list
+        const refreshResponse = await fetch('http://localhost:8000/api/running-strategies', { credentials: 'include' });
+        const refreshData = await refreshResponse.json();
+        if (refreshResponse.ok && refreshData.status === 'success') {
+          setRunningStrategies(refreshData.strategies || []);
+        }
+        // Notify Saved Strategies to refresh
+        if (onStrategyAction) {
+          onStrategyAction();
+        }
+        // Also dispatch custom event for Saved Strategies to refresh
+        window.dispatchEvent(new CustomEvent('refreshStrategies'));
+      } else {
+        alert('Error: ' + (data.message || 'Failed to pause strategy'));
+      }
+    } catch (error: any) {
+      console.error('Error pausing strategy:', error);
+      alert(`An error occurred while pausing the strategy: ${error.message}`);
+    }
+  };
+
+  const handleSquareOffStrategy = async (strategyId: string) => {
+    if (!window.confirm('Are you sure you want to square off this strategy? This will close all open positions.')) {
+      return;
+    }
+    try {
+      const response = await fetch(`http://localhost:8000/api/strategy/squareoff/${strategyId}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(data.message || 'Strategy square off executed successfully!');
+        // Refresh the running strategies list
+        const refreshResponse = await fetch('http://localhost:8000/api/running-strategies', { credentials: 'include' });
+        const refreshData = await refreshResponse.json();
+        if (refreshResponse.ok && refreshData.status === 'success') {
+          setRunningStrategies(refreshData.strategies || []);
+        }
+        // Notify Saved Strategies to refresh (important: status changes from 'running' to 'sq_off')
+        if (onStrategyAction) {
+          onStrategyAction();
+        }
+        // Also dispatch custom event for Saved Strategies to refresh
+        window.dispatchEvent(new CustomEvent('refreshStrategies'));
+      } else {
+        alert('Error: ' + (data.message || 'Failed to square off strategy'));
+      }
+    } catch (error: any) {
+      console.error('Error squaring off strategy:', error);
+      alert(`An error occurred while squaring off the strategy: ${error.message}`);
+    }
+  };
+
   return (
     <div className="card mt-3">
       <div className="card-body">
-        <h5 className="card-title">Running Strategies</h5>
-        <table className="table">
+        <h5 className="card-title">
+          <i className="bi bi-play-circle-fill me-2 text-success"></i>
+          Running Strategies
+        </h5>
+        <table className="table table-hover">
           <thead>
             <tr>
               <th>ID</th>
               <th>Name</th>
               <th>Instrument</th>
               <th>Status</th>
-              <th>Action</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="running-strategies">
             {runningStrategies.length === 0 ? (
               <tr>
-                <td colSpan={5}>No strategies running.</td>
+                <td colSpan={5} className="text-center text-muted">
+                  <i className="bi bi-info-circle me-2"></i>
+                  No strategies currently running.
+                </td>
               </tr>
             ) : (
               runningStrategies.map((strategy) => (
                 <tr key={strategy.id}>
                   <td>{strategy.id}</td>
-                  <td>{strategy.strategy_name || strategy.name}</td>
+                  <td>
+                    <strong>{strategy.strategy_name || strategy.name}</strong>
+                  </td>
                   <td>{strategy.instrument}</td>
                   <td>
-                    <span className={`badge ${strategy.status === 'running' ? 'bg-success' : 'bg-secondary'}`}>
+                    <span className={`badge ${
+                      strategy.status === 'running' ? 'bg-success' :
+                      strategy.status === 'paused' ? 'bg-warning' :
+                      'bg-secondary'
+                    }`}>
                       {strategy.status}
                     </span>
                   </td>
                   <td>
-                    {/* Add actions for running strategies if any */}
+                    <div className="d-flex gap-1">
+                      <button 
+                        className="btn btn-sm btn-primary" 
+                        onClick={() => onViewLive(strategy.id)}
+                        title="Live Monitor"
+                      >
+                        <i className="bi bi-activity"></i>
+                      </button>
+                      <button 
+                        className="btn btn-sm btn-warning" 
+                        onClick={() => handlePauseStrategy(strategy.id)}
+                        title="Cancel/Pause Strategy"
+                      >
+                        <i className="bi bi-stop-fill"></i>
+                      </button>
+                      <button 
+                        className="btn btn-sm btn-danger" 
+                        onClick={() => handleSquareOffStrategy(strategy.id)}
+                        title="Square Off Strategy"
+                      >
+                        <i className="bi bi-x-circle"></i>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -868,6 +992,11 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ niftyPrice, bankNif
     setStrategyBuilderOpen(true);
   };
 
+  // Callback to refresh Saved Strategies when actions occur in Running Strategies
+  const handleStrategyAction = () => {
+    setRefreshStrategies(prev => prev + 1);
+  };
+
   return (
     <div className="container mt-4" id="dashboard-content">
       <div className="row">
@@ -893,7 +1022,7 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ niftyPrice, bankNif
           </div>
           <LivePnL pnl={0} /> {/* P&L will be updated via WebSocket or API */}
           <ActiveTrade />
-          <RunningStrategies />
+          <RunningStrategies onViewLive={onViewLiveStrategy} onStrategyAction={handleStrategyAction} />
         </div>
       </div>
     </div>

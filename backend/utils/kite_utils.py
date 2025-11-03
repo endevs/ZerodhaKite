@@ -55,21 +55,34 @@ def get_option_symbols(kite, underlying, expiry_type, num_strikes):
 
     today = datetime.date.today()
     
-    if expiry_type == 'weekly':
+    # Normalize expiry_type to lowercase for case-insensitive matching
+    expiry_type_lower = expiry_type.lower() if expiry_type else ''
+    
+    if expiry_type_lower == 'weekly':
         # Find the first expiry after today
-        expiry_date = next((d for d in all_expiries if d > today), None)
-    elif expiry_type == 'next_weekly':
+        expiries_after_today = [d for d in all_expiries if d > today]
+        expiry_date = expiries_after_today[0] if len(expiries_after_today) > 0 else None
+        # If no expiry after today, try to get today's expiry or next available
+        if not expiry_date:
+            expiry_date = next((d for d in all_expiries if d >= today), None)
+    elif expiry_type_lower == 'next_weekly':
         # Find the second expiry after today
         expiries_after_today = [d for d in all_expiries if d > today]
         expiry_date = expiries_after_today[1] if len(expiries_after_today) > 1 else None
-    elif expiry_type == 'monthly':
+        # Fallback to first expiry if second doesn't exist
+        if not expiry_date and len(expiries_after_today) > 0:
+            expiry_date = expiries_after_today[0]
+    elif expiry_type_lower == 'monthly':
         # Find the next expiry that is at least 20 days away
         expiry_date = next((d for d in all_expiries if (d - today).days >= 20), None)
+        # Fallback to furthest expiry if no monthly expiry found
+        if not expiry_date and len(all_expiries) > 0:
+            expiry_date = max(all_expiries)
     else:
         expiry_date = None
 
     if not expiry_date:
-        logging.error(f"Could not find expiry date for {underlying} {expiry_type}")
+        logging.error(f"Could not find expiry date for {underlying} {expiry_type}. Available expiries: {all_expiries[:5] if len(all_expiries) > 0 else 'none'}")
         return []
 
     expiry_date_str = expiry_date.strftime('%Y-%m-%d')

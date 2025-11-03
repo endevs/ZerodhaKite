@@ -77,7 +77,10 @@ const Dashboard: React.FC = () => {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1000,
-      reconnectionAttempts: 5
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
+      timeout: 20000,
+      forceNew: false
     });
 
     socket.on('connect', () => {
@@ -85,10 +88,36 @@ const Dashboard: React.FC = () => {
       socket.emit('my_event', { data: 'I\'m connected!' });
     });
 
+    socket.on('disconnect', (reason: string) => {
+      console.log('WebSocket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        // Server disconnected the socket, need to reconnect manually
+        socket.connect();
+      }
+      // Otherwise, it will automatically reconnect
+    });
+
     socket.on('connect_error', (error: any) => {
       console.error('WebSocket connection error:', error);
-      setNiftyPrice('Connection Error');
-      setBankNiftyPrice('Connection Error');
+      // Don't set error state immediately - let reconnection handle it
+    });
+
+    socket.on('reconnect', (attemptNumber: number) => {
+      console.log('WebSocket reconnected after', attemptNumber, 'attempts');
+    });
+
+    socket.on('reconnect_attempt', (attemptNumber: number) => {
+      console.log('WebSocket reconnection attempt', attemptNumber);
+    });
+
+    socket.on('reconnect_error', (error: any) => {
+      console.error('WebSocket reconnection error:', error);
+    });
+
+    socket.on('reconnect_failed', () => {
+      console.error('WebSocket reconnection failed');
+      setNiftyPrice('Connection Lost');
+      setBankNiftyPrice('Connection Lost');
     });
 
     socket.on('unauthorized', (msg: { message: string }) => {
