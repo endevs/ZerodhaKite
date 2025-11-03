@@ -74,7 +74,7 @@ const Dashboard: React.FC = () => {
     fetchInitialMarketData();
 
     const socket: Socket = io('http://localhost:8000', {
-      transports: ['websocket', 'polling'],
+      transports: ['polling'],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,

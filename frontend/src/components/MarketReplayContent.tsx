@@ -33,7 +33,7 @@ const MarketReplayContent: React.FC = () => {
 
   useEffect(() => {
     // Initialize socket connection
-    socketRef.current = io('http://localhost:8000');
+    socketRef.current = io('http://localhost:8000', { transports: ['polling'] });
     
     const socket = socketRef.current;
 

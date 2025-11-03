@@ -157,6 +157,119 @@ def send_email(to_email, otp):
 def favicon():
     return '', 204
 
+@app.route('/api/chart_data')
+def api_chart_data():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    date_str = request.args.get('date')
+    instrument = request.args.get('instrument', 'BANKNIFTY')  # Default: BANKNIFTY
+    interval = request.args.get('interval', '5m')  # 1m,3m,5m,15m,30m,60m
+    try:
+        if not date_str:
+            return jsonify({'candles': [], 'ema': []})
+        # Parse selected date (YYYY-MM-DD)
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+        # Build from/to with market timings 09:15 to 15:30
+        start_dt = datetime.datetime.combine(selected_date, datetime.time(9, 15))
+        end_dt = datetime.datetime.combine(selected_date, datetime.time(15, 30))
+
+        # Resolve instrument token for index
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'candles': [], 'ema': []})
+
+        # Map interval to Kite granularity
+        interval_map = {
+            '1m': 'minute',
+            '3m': '3minute',
+            '5m': '5minute',
+            '15m': '15minute',
+            '30m': '30minute',
+            '60m': '60minute'
+        }
+        kite_interval = interval_map.get(interval, '5minute')
+
+        # Fetch historical data from Kite
+        try:
+            hist = kite.historical_data(token, start_dt, end_dt, kite_interval)
+        except Exception as e:
+            logging.error(f"Error fetching historical data: {e}")
+            return jsonify({'candles': [], 'ema': []})
+
+        # Prepare candles and compute indicators
+        candles = []
+        closes = []
+        ema5 = []
+        ema20 = []
+        rsi14 = []
+        for row in hist:
+            ts = row.get('date')
+            # Kite returns datetime; serialize to ISO string
+            if isinstance(ts, (datetime.datetime, datetime.date)):
+                ts_str = ts.isoformat()
+            else:
+                ts_str = str(ts)
+            o = float(row.get('open', 0) or 0)
+            h = float(row.get('high', 0) or 0)
+            l = float(row.get('low', 0) or 0)
+            c = float(row.get('close', 0) or 0)
+            candles.append({'x': ts_str, 'o': o, 'h': h, 'l': l, 'c': c})
+            closes.append(c)
+
+        # EMA helper
+        def compute_ema(values, period):
+            if not values:
+                return []
+            mult = 2 / (period + 1)
+            ema_vals = []
+            ema_curr = float(values[0])
+            for i, val in enumerate(values):
+                ema_curr = (val - ema_curr) * mult + ema_curr if i > 0 else ema_curr
+                ema_vals.append(ema_curr)
+            return ema_vals
+
+        # RSI(14) simple Wilder's method
+        def compute_rsi(values, period=14):
+            if len(values) < period + 1:
+                return [None] * len(values)
+            gains = []
+            losses = []
+            for i in range(1, period + 1):
+                change = values[i] - values[i - 1]
+                gains.append(max(change, 0))
+                losses.append(abs(min(change, 0)))
+            avg_gain = sum(gains) / period
+            avg_loss = sum(losses) / period
+            rsi_series = [None] * period
+            for i in range(period, len(values)):
+                if i > period:
+                    change = values[i] - values[i - 1]
+                    gain = max(change, 0)
+                    loss = abs(min(change, 0))
+                    avg_gain = (avg_gain * (period - 1) + gain) / period
+                    avg_loss = (avg_loss * (period - 1) + loss) / period
+                rs = (avg_gain / avg_loss) if avg_loss != 0 else float('inf')
+                rsi_series.append(100 - (100 / (1 + rs)))
+            return rsi_series
+
+        if closes:
+            ema5_vals = compute_ema(closes, 5)
+            ema20_vals = compute_ema(closes, 20)
+            rsi_vals = compute_rsi(closes, 14)
+            for i in range(len(candles)):
+                ema5.append({'x': candles[i]['x'], 'y': float(ema5_vals[i]) if i < len(ema5_vals) else None})
+                ema20.append({'x': candles[i]['x'], 'y': float(ema20_vals[i]) if i < len(ema20_vals) else None})
+                rsi14.append({'x': candles[i]['x'], 'y': float(rsi_vals[i]) if rsi_vals[i] is not None else None})
+
+        return jsonify({'candles': candles, 'ema5': ema5, 'ema20': ema20, 'rsi14': rsi14})
+    except Exception as e:
+        logging.error(f"/api/chart_data error: {e}", exc_info=True)
+        return jsonify({'candles': [], 'ema': []}), 200
+
 @app.route("/")
 def index():
     if 'user_id' in session:
