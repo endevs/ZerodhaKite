@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import MountainSignalFlowDiagram from './MountainSignalFlowDiagram';
+import ORBFlowDiagram from './ORBFlowDiagram';
 
 interface Strategy {
   id: number;
@@ -144,6 +145,8 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                       <div className="card-body">
                         {selectedStrategy.strategy_type === 'capture_mountain_signal' ? (
                           <MountainSignalFlowDiagram strategy={selectedStrategy} />
+                        ) : selectedStrategy.strategy_type === 'orb' ? (
+                          <ORBFlowDiagram strategy={selectedStrategy} />
                         ) : (
                           <>
                             <h5 className="card-title mb-3">
