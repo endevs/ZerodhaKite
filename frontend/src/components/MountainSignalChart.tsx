@@ -156,6 +156,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
     let consecutiveCandlesForTarget: number = 0;
     let lastCandleHighLessThanEMA: boolean = false;
     let lastCandleLowGreaterThanEMA: boolean = false;
+    // Track which signal candles have already had an entry
+    const signalCandlesWithEntry = new Set<number>();
 
     // Process each candle
     for (let i = emaPeriod; i < candles.length; i++) {
@@ -167,120 +169,127 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
       const candleClose = candle.c;
       const prevCandleClose = prevCandle.c;
 
-      // PE Signal Candle Identification: LOW > 5 EMA
+      // Get RSI value for current candle (for signal identification only)
+      const currentRsi = rsi14Values.length > i ? rsi14Values[i] : null;
+
+      // PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70
       if (candleLow > ema5) {
-        // Check for reset condition
-        if (currentPeSignal && prevCandleClose > currentPeSignal.high && candleLow > ema5) {
-          // New PE signal candle
-          currentPeSignal = {
+        // RSI condition must be met at signal identification time
+        if (currentRsi !== null && currentRsi > 70) {
+          // Check for reset condition: new signal candle replaces old one
+          if (currentPeSignal && prevCandleClose > currentPeSignal.high && candleLow > ema5) {
+            // New PE signal candle identified - old signal candle is now invalid
+            currentPeSignal = {
+              index: i,
+              type: 'PE',
+              high: candleHigh,
+              low: candleLow,
+              time: candle.x
+            };
+            signals.push(currentPeSignal);
+            // Old signal candle is replaced, clear break level
+            setPeBreakLevel(null);
+          } else if (!currentPeSignal) {
+            // First PE signal
+            currentPeSignal = {
+              index: i,
+              type: 'PE',
+              high: candleHigh,
+              low: candleLow,
+              time: candle.x
+            };
+            signals.push(currentPeSignal);
+          }
+        }
+        // If RSI condition not met, log as ignored (only if no current signal exists)
+        else if (!currentPeSignal) {
+          ignored.push({
             index: i,
-            type: 'PE',
-            high: candleHigh,
-            low: candleLow,
-            time: candle.x
-          };
-          signals.push(currentPeSignal);
-        } else if (!currentPeSignal) {
-          // First PE signal
-          currentPeSignal = {
-            index: i,
-            type: 'PE',
-            high: candleHigh,
-            low: candleLow,
-            time: candle.x
-          };
-          signals.push(currentPeSignal);
+            signalTime: candle.x,
+            signalType: 'PE',
+            signalHigh: candleHigh,
+            signalLow: candleLow,
+            reason: `Signal candle identified but RSI condition not met (RSI must be > 70, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+            rsiValue: currentRsi
+          });
         }
       }
 
-      // CE Signal Candle Identification: HIGH < 5 EMA
+      // CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30
       if (candleHigh < ema5) {
-        // Check for reset condition
-        if (currentCeSignal && prevCandleClose < currentCeSignal.low && candleHigh < ema5) {
-          // New CE signal candle
-          currentCeSignal = {
+        // RSI condition must be met at signal identification time
+        if (currentRsi !== null && currentRsi < 30) {
+          // Check for reset condition: new signal candle replaces old one
+          if (currentCeSignal && prevCandleClose < currentCeSignal.low && candleHigh < ema5) {
+            // New CE signal candle identified - old signal candle is now invalid
+            currentCeSignal = {
+              index: i,
+              type: 'CE',
+              high: candleHigh,
+              low: candleLow,
+              time: candle.x
+            };
+            signals.push(currentCeSignal);
+            // Old signal candle is replaced, clear break level
+            setCeBreakLevel(null);
+          } else if (!currentCeSignal) {
+            // First CE signal
+            currentCeSignal = {
+              index: i,
+              type: 'CE',
+              high: candleHigh,
+              low: candleLow,
+              time: candle.x
+            };
+            signals.push(currentCeSignal);
+          }
+        }
+        // If RSI condition not met, log as ignored (only if no current signal exists)
+        else if (!currentCeSignal) {
+          ignored.push({
             index: i,
-            type: 'CE',
-            high: candleHigh,
-            low: candleLow,
-            time: candle.x
-          };
-          signals.push(currentCeSignal);
-        } else if (!currentCeSignal) {
-          // First CE signal
-          currentCeSignal = {
-            index: i,
-            type: 'CE',
-            high: candleHigh,
-            low: candleLow,
-            time: candle.x
-          };
-          signals.push(currentCeSignal);
+            signalTime: candle.x,
+            signalType: 'CE',
+            signalHigh: candleHigh,
+            signalLow: candleLow,
+            reason: `Signal candle identified but RSI condition not met (RSI must be < 30, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+            rsiValue: currentRsi
+          });
         }
       }
 
       // Entry Triggers (only if no active trade)
+      // RSI is checked only at signal identification, not at entry time
       if (!activeTradeEvent) {
-        // Get RSI value for current candle
-        const currentRsi = rsi14Values.length > i ? rsi14Values[i] : null;
-        
-        // PE Entry: Next candle CLOSE < signal candle LOW AND RSI > 70
+        // PE Entry: Next candle CLOSE < signal candle LOW
         if (currentPeSignal && candleClose < currentPeSignal.low) {
-          if (currentRsi !== null && currentRsi > 70) {
-            // RSI condition satisfied - execute entry
-            activeTradeEvent = {
-              index: i,
-              type: 'ENTRY',
-              tradeType: 'PE',
-              price: candleClose,
-              time: candle.x,
-              signalCandleIndex: currentPeSignal.index
-            };
-            trades.push(activeTradeEvent);
-            setPeBreakLevel(currentPeSignal.low);
-          } else {
-            // RSI condition not met - log as ignored signal
-            ignored.push({
-              index: currentPeSignal.index,
-              signalTime: currentPeSignal.time,
-              signalType: 'PE',
-              signalHigh: currentPeSignal.high,
-              signalLow: currentPeSignal.low,
-              reason: `Signal identified but RSI condition not met (RSI must be > 70, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
-              rsiValue: currentRsi
-            });
-            // Reset signal since entry was not taken
-            currentPeSignal = null;
-          }
+          // Entry taken - signal candle already validated with RSI at identification time
+          activeTradeEvent = {
+            index: i,
+            type: 'ENTRY',
+            tradeType: 'PE',
+            price: candleClose,
+            time: candle.x,
+            signalCandleIndex: currentPeSignal.index
+          };
+          trades.push(activeTradeEvent);
+          signalCandlesWithEntry.add(currentPeSignal.index);
+          setPeBreakLevel(currentPeSignal.low);
         }
-        // CE Entry: Next candle CLOSE > signal candle HIGH AND RSI < 30
+        // CE Entry: Next candle CLOSE > signal candle HIGH
         else if (currentCeSignal && candleClose > currentCeSignal.high) {
-          if (currentRsi !== null && currentRsi < 30) {
-            // RSI condition satisfied - execute entry
-            activeTradeEvent = {
-              index: i,
-              type: 'ENTRY',
-              tradeType: 'CE',
-              price: candleClose,
-              time: candle.x,
-              signalCandleIndex: currentCeSignal.index
-            };
-            trades.push(activeTradeEvent);
-            setCeBreakLevel(currentCeSignal.high);
-          } else {
-            // RSI condition not met - log as ignored signal
-            ignored.push({
-              index: currentCeSignal.index,
-              signalTime: currentCeSignal.time,
-              signalType: 'CE',
-              signalHigh: currentCeSignal.high,
-              signalLow: currentCeSignal.low,
-              reason: `Signal identified but RSI condition not met (RSI must be < 30, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
-              rsiValue: currentRsi
-            });
-            // Reset signal since entry was not taken
-            currentCeSignal = null;
-          }
+          // Entry taken - signal candle already validated with RSI at identification time
+          activeTradeEvent = {
+            index: i,
+            type: 'ENTRY',
+            tradeType: 'CE',
+            price: candleClose,
+            time: candle.x,
+            signalCandleIndex: currentCeSignal.index
+          };
+          trades.push(activeTradeEvent);
+          signalCandlesWithEntry.add(currentCeSignal.index);
+          setCeBreakLevel(currentCeSignal.high);
         }
       }
 
@@ -303,7 +312,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             signalCandleIndex: signalCandle.index
           });
           activeTradeEvent = null;
-          currentPeSignal = null;
+          // Keep currentPeSignal active - don't reset it, signal candle remains valid for next entry
           setPeBreakLevel(null);
           consecutiveCandlesForTarget = 0;
           lastCandleHighLessThanEMA = false;
@@ -319,7 +328,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             signalCandleIndex: signalCandle.index
           });
           activeTradeEvent = null;
-          currentCeSignal = null;
+          // Keep currentCeSignal active - don't reset it, signal candle remains valid for next entry
           setCeBreakLevel(null);
           consecutiveCandlesForTarget = 0;
           lastCandleLowGreaterThanEMA = false;
@@ -341,7 +350,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                 signalCandleIndex: signalCandle.index
               });
               activeTradeEvent = null;
-              currentPeSignal = null;
+              // Keep currentPeSignal active - don't reset it, signal candle remains valid for next entry
               setPeBreakLevel(null);
               consecutiveCandlesForTarget = 0;
               lastCandleHighLessThanEMA = false;
@@ -367,7 +376,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                 signalCandleIndex: signalCandle.index
               });
               activeTradeEvent = null;
-              currentCeSignal = null;
+              // Keep currentCeSignal active - don't reset it, signal candle remains valid for next entry
               setCeBreakLevel(null);
               consecutiveCandlesForTarget = 0;
               lastCandleLowGreaterThanEMA = false;
