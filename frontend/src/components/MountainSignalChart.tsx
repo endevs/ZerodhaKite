@@ -92,6 +92,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [backtestToDate, setBacktestToDate] = useState<string>('');
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestError, setBacktestError] = useState<string | null>(null);
+  const [filterPE, setFilterPE] = useState<boolean>(true);
+  const [filterCE, setFilterCE] = useState<boolean>(true);
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [backtestResults, setBacktestResults] = useState<{
     trades: Array<{
       signalIndex: number;
@@ -1000,162 +1003,290 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               </div>
             )}
 
-            {backtestResults && (
-              <>
-                {/* Summary Metrics */}
-                <div className="card border-0 shadow-sm mb-4">
-                  <div className="card-header bg-primary text-white">
-                    <h6 className="mb-0">
-                      <i className="bi bi-bar-chart-line me-2"></i>
-                      Summary Report
-                    </h6>
-                  </div>
-                  <div className="card-body">
-                    <div className="row">
-                      <div className="col-md-3 mb-3">
-                        <div className="text-center p-3 bg-light rounded">
-                          <div className="text-muted small">Total Trades</div>
-                          <div className="h4 mb-0 fw-bold">{backtestResults.summary.totalTrades}</div>
-                          <div className="small text-muted">
-                            {backtestResults.summary.winningTrades}W / {backtestResults.summary.losingTrades}L
-                          </div>
-                        </div>
-                      </div>
-                      <div className="col-md-3 mb-3">
-                        <div className="text-center p-3 bg-light rounded">
-                          <div className="text-muted small">Win Rate</div>
-                          <div className="h4 mb-0 fw-bold" style={{ color: backtestResults.summary.winRate >= 50 ? '#28a745' : '#dc3545' }}>
-                            {backtestResults.summary.winRate.toFixed(2)}%
-                          </div>
-                        </div>
-                      </div>
-                      <div className="col-md-3 mb-3">
-                        <div className="text-center p-3 bg-light rounded">
-                          <div className="text-muted small">Total P&L</div>
-                          <div className={`h4 mb-0 fw-bold ${backtestResults.summary.totalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
-                            {backtestResults.summary.totalPnl >= 0 ? '+' : ''}{backtestResults.summary.totalPnl.toFixed(2)}
-                          </div>
-                          <div className="text-muted small">Avg: {backtestResults.summary.averagePnl >= 0 ? '+' : ''}{backtestResults.summary.averagePnl.toFixed(2)}</div>
-                        </div>
-                      </div>
-                      <div className="col-md-3 mb-3">
-                        <div className="text-center p-3 bg-light rounded">
-                          <div className="text-muted small">Max Drawdown</div>
-                          <div className="h4 mb-0 fw-bold text-danger">
-                            {backtestResults.summary.maxDrawdownPercent.toFixed(2)}%
-                          </div>
-                          <div className="text-muted small">₹{backtestResults.summary.maxDrawdown.toFixed(2)}</div>
-                        </div>
-                      </div>
-                      <div className="col-md-6 mb-3">
-                        <div className="text-center p-3 bg-success bg-opacity-10 rounded">
-                          <div className="text-muted small">Max Winning Day</div>
-                          <div className="h5 mb-0 fw-bold text-success">
-                            {new Date(backtestResults.summary.maxWinningDay.date).toLocaleDateString()}
-                          </div>
-                          <div className="text-success">+₹{backtestResults.summary.maxWinningDay.pnl.toFixed(2)}</div>
-                        </div>
-                      </div>
-                      <div className="col-md-6 mb-3">
-                        <div className="text-center p-3 bg-danger bg-opacity-10 rounded">
-                          <div className="text-muted small">Max Losing Day</div>
-                          <div className="h5 mb-0 fw-bold text-danger">
-                            {new Date(backtestResults.summary.maxLosingDay.date).toLocaleDateString()}
-                          </div>
-                          <div className="text-danger">₹{backtestResults.summary.maxLosingDay.pnl.toFixed(2)}</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+            {backtestResults && (() => {
+              // Filter trades based on PE/CE checkboxes
+              const filteredTrades = backtestResults.trades.filter(trade => {
+                if (filterPE && filterCE) return true;
+                if (filterPE && trade.signalType === 'PE') return true;
+                if (filterCE && trade.signalType === 'CE') return true;
+                return false;
+              });
 
-                {/* Trade History Table */}
-                <div className="card border-0 shadow-sm">
-                  <div className="card-header bg-dark text-white">
-                    <h6 className="mb-0">
-                      <i className="bi bi-table me-2"></i>
-                      Trade History & P&L Analysis
-                    </h6>
-                  </div>
-                  <div className="card-body">
-                    <div className="table-responsive">
-                      <table className="table table-hover table-striped">
-                        <thead className="table-dark">
-                          <tr>
-                            <th>#</th>
-                            <th>Date</th>
-                            <th>Signal Time</th>
-                            <th>Signal Type</th>
-                            <th>Entry Time</th>
-                            <th>Entry Price</th>
-                            <th>Exit Time</th>
-                            <th>Exit Price</th>
-                            <th>Exit Type</th>
-                            <th>P&L</th>
-                            <th>P&L %</th>
-                            <th>Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {backtestResults.trades.map((trade, index) => (
-                            <tr key={index}>
-                              <td>{index + 1}</td>
-                              <td>{new Date(trade.date).toLocaleDateString()}</td>
-                              <td>{new Date(trade.signalTime).toLocaleTimeString()}</td>
-                              <td>
-                                <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
-                                  {trade.signalType}
-                                </span>
-                              </td>
-                              <td>{new Date(trade.entryTime).toLocaleTimeString()}</td>
-                              <td>{trade.entryPrice.toFixed(2)}</td>
-                              <td>{trade.exitTime ? new Date(trade.exitTime).toLocaleTimeString() : '-'}</td>
-                              <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : '-'}</td>
-                              <td>
-                                {trade.exitType ? (
-                                  <span className={`badge ${
-                                    trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
-                                    trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 'bg-warning'
-                                  }`}>
-                                    {trade.exitType === 'MKT_CLOSE' ? 'Market Close' : trade.exitType}
-                                  </span>
-                                ) : '-'}
-                              </td>
-                              <td>
-                                {trade.pnl !== null ? (
-                                  <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
-                                    {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
-                                  </span>
-                                ) : '-'}
-                              </td>
-                              <td>
-                                {trade.pnlPercent !== null ? (
-                                  <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
-                                    {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
-                                  </span>
-                                ) : '-'}
-                              </td>
-                              <td>
-                                <span className={`badge ${trade.exitTime ? 'bg-success' : 'bg-warning'}`}>
-                                  {trade.exitTime ? 'Closed' : 'Open'}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                          <tr className="table-info fw-bold">
-                            <td colSpan={9} className="text-end">Total P&L:</td>
-                            <td className={backtestResults.summary.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
-                              {backtestResults.summary.totalPnl >= 0 ? '+' : ''}{backtestResults.summary.totalPnl.toFixed(2)}
-                            </td>
-                            <td colSpan={2}></td>
-                          </tr>
-                        </tbody>
-                      </table>
+              // Calculate filtered summary metrics
+              const closedFilteredTrades = filteredTrades.filter(t => t.exitTime !== null);
+              const filteredTotalTrades = closedFilteredTrades.length;
+              const filteredWinningTrades = closedFilteredTrades.filter(t => t.pnl !== null && t.pnl > 0).length;
+              const filteredLosingTrades = closedFilteredTrades.filter(t => t.pnl !== null && t.pnl <= 0).length;
+              const filteredWinRate = filteredTotalTrades > 0 ? (filteredWinningTrades / filteredTotalTrades * 100) : 0;
+              const filteredTotalPnl = closedFilteredTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+              const filteredAveragePnl = filteredTotalTrades > 0 ? filteredTotalPnl / filteredTotalTrades : 0;
+
+              // Group trades by date
+              const tradesByDate = filteredTrades.reduce((acc, trade) => {
+                const dateKey = trade.date;
+                if (!acc[dateKey]) {
+                  acc[dateKey] = [];
+                }
+                acc[dateKey].push(trade);
+                return acc;
+              }, {} as Record<string, typeof filteredTrades>);
+
+              // Calculate daily P&L for filtered trades
+              const dailyPnl: Record<string, number> = {};
+              closedFilteredTrades.forEach(trade => {
+                const dateKey = trade.date;
+                if (!dailyPnl[dateKey]) {
+                  dailyPnl[dateKey] = 0;
+                }
+                dailyPnl[dateKey] += trade.pnl || 0;
+              });
+
+              const sortedDates = Object.keys(tradesByDate).sort();
+
+              const toggleDate = (date: string) => {
+                const newExpanded = new Set(expandedDates);
+                if (newExpanded.has(date)) {
+                  newExpanded.delete(date);
+                } else {
+                  newExpanded.add(date);
+                }
+                setExpandedDates(newExpanded);
+              };
+
+              return (
+                <>
+                  {/* Filter Controls */}
+                  <div className="card border-0 shadow-sm mb-3">
+                    <div className="card-body">
+                      <div className="row align-items-center">
+                        <div className="col-md-6">
+                          <label className="form-label fw-bold me-3">
+                            <i className="bi bi-funnel me-2"></i>Filter by Signal Type:
+                          </label>
+                          <div className="form-check form-check-inline">
+                            <input
+                              className="form-check-input"
+                              type="checkbox"
+                              id="filter-pe"
+                              checked={filterPE}
+                              onChange={(e) => setFilterPE(e.target.checked)}
+                            />
+                            <label className="form-check-label" htmlFor="filter-pe">
+                              <span className="badge bg-danger">PE</span>
+                            </label>
+                          </div>
+                          <div className="form-check form-check-inline">
+                            <input
+                              className="form-check-input"
+                              type="checkbox"
+                              id="filter-ce"
+                              checked={filterCE}
+                              onChange={(e) => setFilterCE(e.target.checked)}
+                            />
+                            <label className="form-check-label" htmlFor="filter-ce">
+                              <span className="badge bg-success">CE</span>
+                            </label>
+                          </div>
+                        </div>
+                        <div className="col-md-6 text-end">
+                          <small className="text-muted">
+                            Showing {filteredTrades.length} of {backtestResults.trades.length} trades
+                          </small>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </>
-            )}
+
+                  {/* Summary Metrics */}
+                  <div className="card border-0 shadow-sm mb-4">
+                    <div className="card-header bg-primary text-white">
+                      <h6 className="mb-0">
+                        <i className="bi bi-bar-chart-line me-2"></i>
+                        Summary Report {(!filterPE || !filterCE) && `(Filtered)`}
+                      </h6>
+                    </div>
+                    <div className="card-body">
+                      <div className="row">
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Total Trades</div>
+                            <div className="h4 mb-0 fw-bold">{filteredTotalTrades}</div>
+                            <div className="small text-muted">
+                              {filteredWinningTrades}W / {filteredLosingTrades}L
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Win Rate</div>
+                            <div className="h4 mb-0 fw-bold" style={{ color: filteredWinRate >= 50 ? '#28a745' : '#dc3545' }}>
+                              {filteredWinRate.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Total P&L</div>
+                            <div className={`h4 mb-0 fw-bold ${filteredTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                              {filteredTotalPnl >= 0 ? '+' : ''}{filteredTotalPnl.toFixed(2)}
+                            </div>
+                            <div className="text-muted small">Avg: {filteredAveragePnl >= 0 ? '+' : ''}{filteredAveragePnl.toFixed(2)}</div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Max Drawdown</div>
+                            <div className="h4 mb-0 fw-bold text-danger">
+                              {backtestResults.summary.maxDrawdownPercent.toFixed(2)}%
+                            </div>
+                            <div className="text-muted small">₹{backtestResults.summary.maxDrawdown.toFixed(2)}</div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-3">
+                          <div className="text-center p-3 bg-success bg-opacity-10 rounded">
+                            <div className="text-muted small">Max Winning Day</div>
+                            <div className="h5 mb-0 fw-bold text-success">
+                              {new Date(backtestResults.summary.maxWinningDay.date).toLocaleDateString()}
+                            </div>
+                            <div className="text-success">+₹{backtestResults.summary.maxWinningDay.pnl.toFixed(2)}</div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-3">
+                          <div className="text-center p-3 bg-danger bg-opacity-10 rounded">
+                            <div className="text-muted small">Max Losing Day</div>
+                            <div className="h5 mb-0 fw-bold text-danger">
+                              {new Date(backtestResults.summary.maxLosingDay.date).toLocaleDateString()}
+                            </div>
+                            <div className="text-danger">₹{backtestResults.summary.maxLosingDay.pnl.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Trade History Table - Grouped by Date */}
+                  <div className="card border-0 shadow-sm">
+                    <div className="card-header bg-dark text-white">
+                      <h6 className="mb-0">
+                        <i className="bi bi-table me-2"></i>
+                        Trade History & P&L Analysis {(!filterPE || !filterCE) && `(Filtered)`}
+                      </h6>
+                    </div>
+                    <div className="card-body p-0">
+                      <div className="table-responsive">
+                        <table className="table table-hover table-striped mb-0">
+                          <thead className="table-dark">
+                            <tr>
+                              <th style={{ width: '40px' }}></th>
+                              <th style={{ width: '50px' }}>#</th>
+                              <th>Date</th>
+                              <th>Signal Time</th>
+                              <th>Signal Type</th>
+                              <th>Entry Time</th>
+                              <th>Entry Price</th>
+                              <th>Exit Time</th>
+                              <th>Exit Price</th>
+                              <th>Exit Type</th>
+                              <th>P&L</th>
+                              <th>P&L %</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sortedDates.map((dateKey, dateIndex) => {
+                              const dateTrades = tradesByDate[dateKey];
+                              const datePnl = dailyPnl[dateKey] || 0;
+                              const isExpanded = expandedDates.has(dateKey);
+                              const closedTradesForDate = dateTrades.filter(t => t.exitTime !== null);
+                              const dateTotalPnl = closedTradesForDate.reduce((sum, t) => sum + (t.pnl || 0), 0);
+                              
+                              return (
+                                <React.Fragment key={dateKey}>
+                                  <tr 
+                                    className="table-secondary fw-bold cursor-pointer" 
+                                    style={{ cursor: 'pointer' }}
+                                    onClick={() => toggleDate(dateKey)}
+                                  >
+                                    <td>
+                                      <i className={`bi bi-chevron-${isExpanded ? 'down' : 'right'}`}></i>
+                                    </td>
+                                    <td colSpan={11}>
+                                      <div className="d-flex justify-content-between align-items-center">
+                                        <span>
+                                          <i className="bi bi-calendar3 me-2"></i>
+                                          {new Date(dateKey).toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
+                                          <span className="badge bg-info ms-2">{dateTrades.length} trade{dateTrades.length !== 1 ? 's' : ''}</span>
+                                        </span>
+                                        <span className={`fw-bold ${dateTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                          Daily P&L: {dateTotalPnl >= 0 ? '+' : ''}{dateTotalPnl.toFixed(2)}
+                                        </span>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                  {isExpanded && dateTrades.map((trade, tradeIndex) => (
+                                    <tr key={`${dateKey}-${tradeIndex}`} className="table-light">
+                                      <td></td>
+                                      <td>{dateIndex * 1000 + tradeIndex + 1}</td>
+                                      <td>{new Date(trade.date).toLocaleDateString()}</td>
+                                      <td>{new Date(trade.signalTime).toLocaleTimeString()}</td>
+                                      <td>
+                                        <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                                          {trade.signalType}
+                                        </span>
+                                      </td>
+                                      <td>{new Date(trade.entryTime).toLocaleTimeString()}</td>
+                                      <td>{trade.entryPrice.toFixed(2)}</td>
+                                      <td>{trade.exitTime ? new Date(trade.exitTime).toLocaleTimeString() : '-'}</td>
+                                      <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : '-'}</td>
+                                      <td>
+                                        {trade.exitType ? (
+                                          <span className={`badge ${
+                                            trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
+                                            trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 'bg-warning'
+                                          }`}>
+                                            {trade.exitType === 'MKT_CLOSE' ? 'Market Close' : trade.exitType}
+                                          </span>
+                                        ) : '-'}
+                                      </td>
+                                      <td>
+                                        {trade.pnl !== null ? (
+                                          <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                            {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+                                          </span>
+                                        ) : '-'}
+                                      </td>
+                                      <td>
+                                        {trade.pnlPercent !== null ? (
+                                          <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                                            {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
+                                          </span>
+                                        ) : '-'}
+                                      </td>
+                                      <td>
+                                        <span className={`badge ${trade.exitTime ? 'bg-success' : 'bg-warning'}`}>
+                                          {trade.exitTime ? 'Closed' : 'Open'}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </React.Fragment>
+                              );
+                            })}
+                            <tr className="table-info fw-bold">
+                              <td colSpan={10} className="text-end">Total P&L ({(!filterPE || !filterCE) && 'Filtered'}):</td>
+                              <td className={filteredTotalPnl >= 0 ? 'text-success' : 'text-danger'}>
+                                {filteredTotalPnl >= 0 ? '+' : ''}{filteredTotalPnl.toFixed(2)}
+                              </td>
+                              <td colSpan={2}></td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>
