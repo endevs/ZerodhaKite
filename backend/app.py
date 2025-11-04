@@ -1139,6 +1139,424 @@ def cancel_strategy(strategy_id):
         del running_strategies[strategy_id]
     return redirect("/dashboard")
 
+@app.route("/api/backtest_mountain_signal", methods=['POST'])
+def api_backtest_mountain_signal():
+    """Backtest Mountain Signal strategy for a date range"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        data = request.get_json()
+        from_date_str = data.get('from_date')
+        to_date_str = data.get('to_date')
+        instrument = data.get('instrument', 'BANKNIFTY')
+        candle_time = data.get('candle_time', '5')
+        ema_period = data.get('ema_period', 5)
+
+        if not from_date_str or not to_date_str:
+            return jsonify({'status': 'error', 'message': 'From date and to date are required'}), 400
+
+        from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+        to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+
+        # Validate date range (max 30 days)
+        days_diff = (to_date - from_date).days
+        if days_diff > 30:
+            return jsonify({'status': 'error', 'message': 'Maximum 30 days allowed'}), 400
+
+        # Resolve instrument token
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
+
+        # Fetch historical data for all dates in range
+        all_candles = []
+        current_date = from_date
+        kite_interval = f"{candle_time}minute"
+
+        while current_date <= to_date:
+            # Skip weekends
+            if current_date.weekday() < 5:  # Monday=0, Friday=4
+                start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+                end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+                
+                try:
+                    hist = kite.historical_data(token, start_dt, end_dt, kite_interval)
+                    if hist:
+                        all_candles.extend(hist)
+                except Exception as e:
+                    logging.error(f"Error fetching historical data for {current_date}: {e}")
+            
+            current_date += datetime.timedelta(days=1)
+
+        if not all_candles:
+            return jsonify({'status': 'error', 'message': 'No historical data found for the selected date range'}), 404
+
+        # Sort candles by date
+        all_candles.sort(key=lambda x: x['date'])
+
+        # Run Mountain Signal strategy logic on historical data
+        from utils.indicators import calculate_rsi
+        import pandas as pd
+        import numpy as np
+
+        # Convert to DataFrame
+        df_data = []
+        for candle in all_candles:
+            df_data.append({
+                'date': candle['date'],
+                'open': candle['open'],
+                'high': candle['high'],
+                'low': candle['low'],
+                'close': candle['close']
+            })
+        
+        df = pd.DataFrame(df_data)
+        df['ema'] = df['close'].ewm(span=ema_period, adjust=False).mean()
+        
+        # Calculate RSI 14
+        if len(df) >= 15:
+            df['rsi14'] = calculate_rsi(df['close'], period=14)
+        else:
+            df['rsi14'] = None
+
+        # Initialize strategy state
+        pe_signal_candle = None
+        ce_signal_candle = None
+        trade_placed = False
+        position = 0  # 0: flat, 1: long (CE), -1: short (PE)
+        entry_price = 0
+        exit_price = 0
+        trades = []
+        pe_signal_price_above_low = False
+        ce_signal_price_below_high = False
+        signal_candles_with_entry = set()
+        consecutive_candles_for_target = 0
+        last_candle_high_less_than_ema = False
+        last_candle_low_greater_than_ema = False
+        # Store signal candle info in active trade for exit logic
+        active_trade_signal_candle = None
+
+        # Process each candle
+        for i in range(1, len(df)):
+            current_candle = df.iloc[i]
+            previous_candle = df.iloc[i-1]
+            current_ema = current_candle['ema']
+            previous_ema = previous_candle['ema']
+            previous_rsi = df.iloc[i-1]['rsi14'] if 'rsi14' in df.columns else None
+
+            # Signal Identification (using previous candle)
+            # PE Signal: LOW > 5 EMA AND RSI > 70
+            if previous_candle['low'] > previous_ema:
+                if previous_rsi is not None and previous_rsi > 70:
+                    if pe_signal_candle is not None:
+                        pe_signal_price_above_low = False
+                        if 'index' in pe_signal_candle:
+                            signal_candles_with_entry.discard(pe_signal_candle['index'])
+                    pe_signal_candle = {
+                        'date': previous_candle['date'],
+                        'high': previous_candle['high'],
+                        'low': previous_candle['low'],
+                        'index': i-1
+                    }
+                    ce_signal_candle = None
+
+            # CE Signal: HIGH < 5 EMA AND RSI < 30
+            if previous_candle['high'] < previous_ema:
+                if previous_rsi is not None and previous_rsi < 30:
+                    if ce_signal_candle is not None:
+                        ce_signal_price_below_high = False
+                        if 'index' in ce_signal_candle:
+                            signal_candles_with_entry.discard(ce_signal_candle['index'])
+                    ce_signal_candle = {
+                        'date': previous_candle['date'],
+                        'high': previous_candle['high'],
+                        'low': previous_candle['low'],
+                        'index': i-1
+                    }
+                    pe_signal_candle = None
+
+            # Price action validation for re-entry
+            if pe_signal_candle is not None and not trade_placed and not pe_signal_price_above_low:
+                if current_candle['high'] > pe_signal_candle['low']:
+                    pe_signal_price_above_low = True
+
+            if ce_signal_candle is not None and not trade_placed and not ce_signal_price_below_high:
+                if current_candle['low'] < ce_signal_candle['high']:
+                    ce_signal_price_below_high = True
+
+            # Entry Logic
+            if not trade_placed:
+                # PE Entry
+                if pe_signal_candle is not None and current_candle['close'] < pe_signal_candle['low']:
+                    signal_candle_index = pe_signal_candle['index']
+                    is_first_entry = signal_candle_index not in signal_candles_with_entry
+                    entry_allowed = is_first_entry or pe_signal_price_above_low
+                    
+                    if entry_allowed:
+                        trade_placed = True
+                        position = -1  # PE (short)
+                        entry_price = current_candle['close']
+                        signal_candles_with_entry.add(signal_candle_index)
+                        pe_signal_price_above_low = False
+                        # Store signal candle info for exit logic
+                        active_trade_signal_candle = {
+                            'high': pe_signal_candle['high'],
+                            'low': pe_signal_candle['low'],
+                            'type': 'PE'
+                        }
+                        trades.append({
+                            'signal_time': pe_signal_candle['date'],
+                            'signal_type': 'PE',
+                            'signal_high': pe_signal_candle['high'],
+                            'signal_low': pe_signal_candle['low'],
+                            'entry_time': current_candle['date'],
+                            'entry_price': entry_price,
+                            'exit_time': None,
+                            'exit_price': None,
+                            'exit_type': None,
+                            'pnl': None,
+                            'pnl_percent': None,
+                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date']
+                        })
+                        consecutive_candles_for_target = 0
+                        last_candle_high_less_than_ema = False
+
+                # CE Entry
+                elif ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
+                    signal_candle_index = ce_signal_candle['index']
+                    is_first_entry = signal_candle_index not in signal_candles_with_entry
+                    entry_allowed = is_first_entry or ce_signal_price_below_high
+                    
+                    if entry_allowed:
+                        trade_placed = True
+                        position = 1  # CE (long)
+                        entry_price = current_candle['close']
+                        signal_candles_with_entry.add(signal_candle_index)
+                        ce_signal_price_below_high = False
+                        # Store signal candle info for exit logic
+                        active_trade_signal_candle = {
+                            'high': ce_signal_candle['high'],
+                            'low': ce_signal_candle['low'],
+                            'type': 'CE'
+                        }
+                        trades.append({
+                            'signal_time': ce_signal_candle['date'],
+                            'signal_type': 'CE',
+                            'signal_high': ce_signal_candle['high'],
+                            'signal_low': ce_signal_candle['low'],
+                            'entry_time': current_candle['date'],
+                            'entry_price': entry_price,
+                            'exit_time': None,
+                            'exit_price': None,
+                            'exit_type': None,
+                            'pnl': None,
+                            'pnl_percent': None,
+                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date']
+                        })
+                        consecutive_candles_for_target = 0
+                        last_candle_low_greater_than_ema = False
+
+            # Exit Logic (Stop Loss and Target)
+            elif trade_placed:
+                candle_time_obj = current_candle['date']
+                if isinstance(candle_time_obj, datetime.datetime):
+                    candle_time_check = candle_time_obj.time()
+                else:
+                    candle_time_check = datetime.datetime.now().time()
+
+                # Market Close Square Off (3:15 PM)
+                market_close_square_off_time = datetime.time(15, 15)
+                if market_close_square_off_time <= candle_time_check < datetime.time(15, 30):
+                    exit_price = current_candle['close']
+                    trades[-1]['exit_time'] = current_candle['date']
+                    trades[-1]['exit_price'] = exit_price
+                    trades[-1]['exit_type'] = 'MKT_CLOSE'
+                    if position == -1:  # PE
+                        pnl = (entry_price - exit_price) * 50
+                        pnl_percent = ((entry_price - exit_price) / entry_price) * 100
+                    else:  # CE
+                        pnl = (exit_price - entry_price) * 50
+                        pnl_percent = ((exit_price - entry_price) / entry_price) * 100
+                    trades[-1]['pnl'] = pnl
+                    trades[-1]['pnl_percent'] = pnl_percent
+                    trade_placed = False
+                    position = 0
+                    active_trade_signal_candle = None
+                    continue
+
+                # PE Exit Logic
+                if position == -1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'PE':  # PE trade
+                    # Stop Loss
+                    if current_candle['close'] > active_trade_signal_candle['high']:
+                        exit_price = current_candle['close']
+                        trades[-1]['exit_time'] = current_candle['date']
+                        trades[-1]['exit_price'] = exit_price
+                        trades[-1]['exit_type'] = 'STOP_LOSS'
+                        pnl = (entry_price - exit_price) * 50
+                        pnl_percent = ((entry_price - exit_price) / entry_price) * 100
+                        trades[-1]['pnl'] = pnl
+                        trades[-1]['pnl_percent'] = pnl_percent
+                        trade_placed = False
+                        position = 0
+                        active_trade_signal_candle = None
+                        pe_signal_price_above_low = False
+                        consecutive_candles_for_target = 0
+                        last_candle_high_less_than_ema = False
+                    # Target
+                    elif current_candle['high'] < current_ema:
+                        last_candle_high_less_than_ema = True
+                        consecutive_candles_for_target = 0
+                    elif last_candle_high_less_than_ema and current_candle['close'] > current_ema:
+                        consecutive_candles_for_target += 1
+                        if consecutive_candles_for_target >= 2:
+                            exit_price = current_candle['close']
+                            trades[-1]['exit_time'] = current_candle['date']
+                            trades[-1]['exit_price'] = exit_price
+                            trades[-1]['exit_type'] = 'TARGET'
+                            pnl = (entry_price - exit_price) * 50
+                            pnl_percent = ((entry_price - exit_price) / entry_price) * 100
+                            trades[-1]['pnl'] = pnl
+                            trades[-1]['pnl_percent'] = pnl_percent
+                            trade_placed = False
+                            position = 0
+                            active_trade_signal_candle = None
+                            pe_signal_price_above_low = False
+                            consecutive_candles_for_target = 0
+                            last_candle_high_less_than_ema = False
+
+                # CE Exit Logic
+                elif position == 1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'CE':  # CE trade
+                    # Stop Loss
+                    if current_candle['close'] < active_trade_signal_candle['low']:
+                        exit_price = current_candle['close']
+                        trades[-1]['exit_time'] = current_candle['date']
+                        trades[-1]['exit_price'] = exit_price
+                        trades[-1]['exit_type'] = 'STOP_LOSS'
+                        pnl = (exit_price - entry_price) * 50
+                        pnl_percent = ((exit_price - entry_price) / entry_price) * 100
+                        trades[-1]['pnl'] = pnl
+                        trades[-1]['pnl_percent'] = pnl_percent
+                        trade_placed = False
+                        position = 0
+                        active_trade_signal_candle = None
+                        ce_signal_price_below_high = False
+                        consecutive_candles_for_target = 0
+                        last_candle_low_greater_than_ema = False
+                    # Target
+                    elif current_candle['low'] > current_ema:
+                        last_candle_low_greater_than_ema = True
+                        consecutive_candles_for_target = 0
+                    elif last_candle_low_greater_than_ema and current_candle['close'] < current_ema:
+                        consecutive_candles_for_target += 1
+                        if consecutive_candles_for_target >= 2:
+                            exit_price = current_candle['close']
+                            trades[-1]['exit_time'] = current_candle['date']
+                            trades[-1]['exit_price'] = exit_price
+                            trades[-1]['exit_type'] = 'TARGET'
+                            pnl = (exit_price - entry_price) * 50
+                            pnl_percent = ((exit_price - entry_price) / entry_price) * 100
+                            trades[-1]['pnl'] = pnl
+                            trades[-1]['pnl_percent'] = pnl_percent
+                            trade_placed = False
+                            position = 0
+                            active_trade_signal_candle = None
+                            ce_signal_price_below_high = False
+                            consecutive_candles_for_target = 0
+                            last_candle_low_greater_than_ema = False
+
+        # Calculate summary metrics
+        closed_trades = [t for t in trades if t['exit_time'] is not None]
+        total_trades = len(closed_trades)
+        winning_trades = len([t for t in closed_trades if t['pnl'] and t['pnl'] > 0])
+        losing_trades = len([t for t in closed_trades if t['pnl'] and t['pnl'] <= 0])
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = sum([t['pnl'] for t in closed_trades if t['pnl'] is not None])
+        average_pnl = total_pnl / total_trades if total_trades > 0 else 0
+
+        # Calculate Max Drawdown
+        cumulative_pnl = 0
+        equity_curve = [0]
+        for trade in closed_trades:
+            if trade['pnl'] is not None:
+                cumulative_pnl += trade['pnl']
+                equity_curve.append(cumulative_pnl)
+        
+        if len(equity_curve) > 1:
+            running_max = [equity_curve[0]]
+            for i in range(1, len(equity_curve)):
+                running_max.append(max(running_max[-1], equity_curve[i]))
+            
+            drawdowns = [(equity_curve[i] - running_max[i]) for i in range(len(equity_curve))]
+            max_drawdown = min(drawdowns) if drawdowns else 0
+            max_drawdown_percent = abs((max_drawdown / running_max[drawdowns.index(max_drawdown)]) * 100) if running_max[drawdowns.index(max_drawdown)] != 0 else 0
+        else:
+            max_drawdown = 0
+            max_drawdown_percent = 0
+
+        # Calculate Max Winning Day and Max Losing Day
+        daily_pnl = {}
+        for trade in closed_trades:
+            if trade['pnl'] is not None:
+                trade_date = trade['date']
+                if isinstance(trade_date, datetime.date):
+                    date_key = trade_date.isoformat()
+                else:
+                    date_key = str(trade_date)
+                if date_key not in daily_pnl:
+                    daily_pnl[date_key] = 0
+                daily_pnl[date_key] += trade['pnl']
+
+        max_winning_day = {'date': from_date_str, 'pnl': 0}
+        max_losing_day = {'date': from_date_str, 'pnl': 0}
+        for date_key, pnl in daily_pnl.items():
+            if pnl > max_winning_day['pnl']:
+                max_winning_day = {'date': date_key, 'pnl': pnl}
+            if pnl < max_losing_day['pnl']:
+                max_losing_day = {'date': date_key, 'pnl': pnl}
+
+        # Format trades for response
+        formatted_trades = []
+        for trade in trades:
+            formatted_trades.append({
+                'signalTime': trade['signal_time'].isoformat() if isinstance(trade['signal_time'], datetime.datetime) else str(trade['signal_time']),
+                'signalType': trade['signal_type'],
+                'signalHigh': float(trade['signal_high']),
+                'signalLow': float(trade['signal_low']),
+                'entryTime': trade['entry_time'].isoformat() if isinstance(trade['entry_time'], datetime.datetime) else str(trade['entry_time']),
+                'entryPrice': float(trade['entry_price']),
+                'exitTime': trade['exit_time'].isoformat() if isinstance(trade['exit_time'], datetime.datetime) else str(trade['exit_time']) if trade['exit_time'] else None,
+                'exitPrice': float(trade['exit_price']) if trade['exit_price'] else None,
+                'exitType': trade['exit_type'],
+                'pnl': float(trade['pnl']) if trade['pnl'] is not None else None,
+                'pnlPercent': float(trade['pnl_percent']) if trade['pnl_percent'] is not None else None,
+                'date': trade['date'].isoformat() if isinstance(trade['date'], datetime.date) else str(trade['date'])
+            })
+
+        return jsonify({
+            'status': 'success',
+            'trades': formatted_trades,
+            'summary': {
+                'totalTrades': total_trades,
+                'winningTrades': winning_trades,
+                'losingTrades': losing_trades,
+                'winRate': round(win_rate, 2),
+                'totalPnl': round(total_pnl, 2),
+                'averagePnl': round(average_pnl, 2),
+                'maxDrawdown': round(abs(max_drawdown), 2),
+                'maxDrawdownPercent': round(max_drawdown_percent, 2),
+                'maxWinningDay': max_winning_day,
+                'maxLosingDay': max_losing_day
+            }
+        })
+
+    except Exception as e:
+        logging.error(f"Error in backtest_mountain_signal: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error running backtest: {str(e)}'}), 500
+
 @app.route("/backtest", methods=['POST'])
 def backtest_strategy():
     if 'user_id' not in session:

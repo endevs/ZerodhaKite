@@ -56,9 +56,10 @@ interface IgnoredSignal {
 
 interface MountainSignalChartProps {
   strategy: Strategy;
+  activeTab?: 'chart' | 'backtest';
 }
 
-const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) => {
+const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, activeTab = 'chart' }) => {
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [chartData, setChartData] = useState<ChartDataResponse>({ candles: [], ema5: [] });
   const [loading, setLoading] = useState<boolean>(false);
@@ -85,6 +86,43 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
     pnl: number | null;
     pnlPercent: number | null;
   }>>([]);
+  
+  // Backtest state
+  const [backtestFromDate, setBacktestFromDate] = useState<string>('');
+  const [backtestToDate, setBacktestToDate] = useState<string>('');
+  const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const [backtestResults, setBacktestResults] = useState<{
+    trades: Array<{
+      signalIndex: number;
+      signalTime: string;
+      signalType: 'PE' | 'CE';
+      signalHigh: number;
+      signalLow: number;
+      entryIndex: number;
+      entryTime: string;
+      entryPrice: number;
+      exitIndex: number | null;
+      exitTime: string | null;
+      exitPrice: number | null;
+      exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
+      pnl: number | null;
+      pnlPercent: number | null;
+      date: string;
+    }>;
+    summary: {
+      totalTrades: number;
+      winningTrades: number;
+      losingTrades: number;
+      winRate: number;
+      totalPnl: number;
+      averagePnl: number;
+      maxDrawdown: number;
+      maxDrawdownPercent: number;
+      maxWinningDay: { date: string; pnl: number };
+      maxLosingDay: { date: string; pnl: number };
+    };
+  } | null>(null);
 
   const emaPeriod = strategy.ema_period || 5;
   const candleTime = parseInt(strategy.candle_time) || 5;
@@ -833,6 +871,296 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
       return null;
     }
   };
+
+  // Backtest functions
+  const validateDateRange = (from: string, to: string): string | null => {
+    if (!from || !to) {
+      return 'Please select both from and to dates';
+    }
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) {
+      return 'From date must be before or equal to to date';
+    }
+    const daysDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysDiff > 30) {
+      return 'Maximum 30 days allowed. Please select a date range within 30 days';
+    }
+    return null;
+  };
+
+  const runBacktest = async () => {
+    const validationError = validateDateRange(backtestFromDate, backtestToDate);
+    if (validationError) {
+      setBacktestError(validationError);
+      return;
+    }
+
+    setBacktestLoading(true);
+    setBacktestError(null);
+    setBacktestResults(null);
+
+    try {
+      const response = await fetch('http://localhost:8000/api/backtest_mountain_signal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          strategy_id: strategy.id,
+          from_date: backtestFromDate,
+          to_date: backtestToDate,
+          instrument: strategy.instrument,
+          candle_time: strategy.candle_time,
+          ema_period: strategy.ema_period || 5,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to run backtest');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setBacktestResults(data);
+      } else {
+        throw new Error(data.message || 'Backtest failed');
+      }
+    } catch (err) {
+      console.error('Error running backtest:', err);
+      setBacktestError(err instanceof Error ? err.message : 'An error occurred while running backtest');
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  // If backtest tab, show backtest UI
+  if (activeTab === 'backtest') {
+    return (
+      <div className="mountain-signal-chart">
+        <div className="card border-0 shadow-sm mb-3">
+          <div className="card-body">
+            <h5 className="card-title mb-4">
+              <i className="bi bi-clipboard-data me-2"></i>
+              Backtest Report - {strategy.strategy_name}
+            </h5>
+            
+            <div className="row mb-4">
+              <div className="col-md-4">
+                <label htmlFor="backtest-from-date" className="form-label fw-bold">
+                  <i className="bi bi-calendar3 me-2"></i>From Date
+                </label>
+                <input
+                  type="date"
+                  id="backtest-from-date"
+                  className="form-control"
+                  value={backtestFromDate}
+                  onChange={(e) => setBacktestFromDate(e.target.value)}
+                  max={new Date().toISOString().split('T')[0]}
+                />
+              </div>
+              <div className="col-md-4">
+                <label htmlFor="backtest-to-date" className="form-label fw-bold">
+                  <i className="bi bi-calendar3 me-2"></i>To Date
+                </label>
+                <input
+                  type="date"
+                  id="backtest-to-date"
+                  className="form-control"
+                  value={backtestToDate}
+                  onChange={(e) => setBacktestToDate(e.target.value)}
+                  max={new Date().toISOString().split('T')[0]}
+                />
+              </div>
+              <div className="col-md-4">
+                <label className="form-label">&nbsp;</label>
+                <button
+                  className="btn btn-primary w-100"
+                  onClick={runBacktest}
+                  disabled={backtestLoading || !backtestFromDate || !backtestToDate}
+                >
+                  {backtestLoading ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <i className="bi bi-play-circle me-2"></i>Run Backtest
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {backtestError && (
+              <div className="alert alert-danger" role="alert">
+                <i className="bi bi-exclamation-triangle me-2"></i>{backtestError}
+              </div>
+            )}
+
+            {backtestResults && (
+              <>
+                {/* Summary Metrics */}
+                <div className="card border-0 shadow-sm mb-4">
+                  <div className="card-header bg-primary text-white">
+                    <h6 className="mb-0">
+                      <i className="bi bi-bar-chart-line me-2"></i>
+                      Summary Report
+                    </h6>
+                  </div>
+                  <div className="card-body">
+                    <div className="row">
+                      <div className="col-md-3 mb-3">
+                        <div className="text-center p-3 bg-light rounded">
+                          <div className="text-muted small">Total Trades</div>
+                          <div className="h4 mb-0 fw-bold">{backtestResults.summary.totalTrades}</div>
+                          <div className="small text-muted">
+                            {backtestResults.summary.winningTrades}W / {backtestResults.summary.losingTrades}L
+                          </div>
+                        </div>
+                      </div>
+                      <div className="col-md-3 mb-3">
+                        <div className="text-center p-3 bg-light rounded">
+                          <div className="text-muted small">Win Rate</div>
+                          <div className="h4 mb-0 fw-bold" style={{ color: backtestResults.summary.winRate >= 50 ? '#28a745' : '#dc3545' }}>
+                            {backtestResults.summary.winRate.toFixed(2)}%
+                          </div>
+                        </div>
+                      </div>
+                      <div className="col-md-3 mb-3">
+                        <div className="text-center p-3 bg-light rounded">
+                          <div className="text-muted small">Total P&L</div>
+                          <div className={`h4 mb-0 fw-bold ${backtestResults.summary.totalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {backtestResults.summary.totalPnl >= 0 ? '+' : ''}{backtestResults.summary.totalPnl.toFixed(2)}
+                          </div>
+                          <div className="text-muted small">Avg: {backtestResults.summary.averagePnl >= 0 ? '+' : ''}{backtestResults.summary.averagePnl.toFixed(2)}</div>
+                        </div>
+                      </div>
+                      <div className="col-md-3 mb-3">
+                        <div className="text-center p-3 bg-light rounded">
+                          <div className="text-muted small">Max Drawdown</div>
+                          <div className="h4 mb-0 fw-bold text-danger">
+                            {backtestResults.summary.maxDrawdownPercent.toFixed(2)}%
+                          </div>
+                          <div className="text-muted small">₹{backtestResults.summary.maxDrawdown.toFixed(2)}</div>
+                        </div>
+                      </div>
+                      <div className="col-md-6 mb-3">
+                        <div className="text-center p-3 bg-success bg-opacity-10 rounded">
+                          <div className="text-muted small">Max Winning Day</div>
+                          <div className="h5 mb-0 fw-bold text-success">
+                            {new Date(backtestResults.summary.maxWinningDay.date).toLocaleDateString()}
+                          </div>
+                          <div className="text-success">+₹{backtestResults.summary.maxWinningDay.pnl.toFixed(2)}</div>
+                        </div>
+                      </div>
+                      <div className="col-md-6 mb-3">
+                        <div className="text-center p-3 bg-danger bg-opacity-10 rounded">
+                          <div className="text-muted small">Max Losing Day</div>
+                          <div className="h5 mb-0 fw-bold text-danger">
+                            {new Date(backtestResults.summary.maxLosingDay.date).toLocaleDateString()}
+                          </div>
+                          <div className="text-danger">₹{backtestResults.summary.maxLosingDay.pnl.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Trade History Table */}
+                <div className="card border-0 shadow-sm">
+                  <div className="card-header bg-dark text-white">
+                    <h6 className="mb-0">
+                      <i className="bi bi-table me-2"></i>
+                      Trade History & P&L Analysis
+                    </h6>
+                  </div>
+                  <div className="card-body">
+                    <div className="table-responsive">
+                      <table className="table table-hover table-striped">
+                        <thead className="table-dark">
+                          <tr>
+                            <th>#</th>
+                            <th>Date</th>
+                            <th>Signal Time</th>
+                            <th>Signal Type</th>
+                            <th>Entry Time</th>
+                            <th>Entry Price</th>
+                            <th>Exit Time</th>
+                            <th>Exit Price</th>
+                            <th>Exit Type</th>
+                            <th>P&L</th>
+                            <th>P&L %</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {backtestResults.trades.map((trade, index) => (
+                            <tr key={index}>
+                              <td>{index + 1}</td>
+                              <td>{new Date(trade.date).toLocaleDateString()}</td>
+                              <td>{new Date(trade.signalTime).toLocaleTimeString()}</td>
+                              <td>
+                                <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                                  {trade.signalType}
+                                </span>
+                              </td>
+                              <td>{new Date(trade.entryTime).toLocaleTimeString()}</td>
+                              <td>{trade.entryPrice.toFixed(2)}</td>
+                              <td>{trade.exitTime ? new Date(trade.exitTime).toLocaleTimeString() : '-'}</td>
+                              <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : '-'}</td>
+                              <td>
+                                {trade.exitType ? (
+                                  <span className={`badge ${
+                                    trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
+                                    trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 'bg-warning'
+                                  }`}>
+                                    {trade.exitType === 'MKT_CLOSE' ? 'Market Close' : trade.exitType}
+                                  </span>
+                                ) : '-'}
+                              </td>
+                              <td>
+                                {trade.pnl !== null ? (
+                                  <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                    {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+                                  </span>
+                                ) : '-'}
+                              </td>
+                              <td>
+                                {trade.pnlPercent !== null ? (
+                                  <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                                    {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
+                                  </span>
+                                ) : '-'}
+                              </td>
+                              <td>
+                                <span className={`badge ${trade.exitTime ? 'bg-success' : 'bg-warning'}`}>
+                                  {trade.exitTime ? 'Closed' : 'Open'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                          <tr className="table-info fw-bold">
+                            <td colSpan={9} className="text-end">Total P&L:</td>
+                            <td className={backtestResults.summary.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
+                              {backtestResults.summary.totalPnl >= 0 ? '+' : ''}{backtestResults.summary.totalPnl.toFixed(2)}
+                            </td>
+                            <td colSpan={2}></td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mountain-signal-chart">
