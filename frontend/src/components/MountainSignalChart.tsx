@@ -37,7 +37,7 @@ interface SignalCandle {
 
 interface TradeEvent {
   index: number;
-  type: 'ENTRY' | 'EXIT' | 'STOP_LOSS' | 'TARGET';
+  type: 'ENTRY' | 'EXIT' | 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE';
   tradeType: 'PE' | 'CE';
   price: number;
   time: string;
@@ -81,7 +81,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
     exitIndex: number | null;
     exitTime: string | null;
     exitPrice: number | null;
-    exitType: 'STOP_LOSS' | 'TARGET' | null;
+    exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
     pnl: number | null;
     pnlPercent: number | null;
   }>>([]);
@@ -158,6 +158,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
     let lastCandleLowGreaterThanEMA: boolean = false;
     // Track which signal candles have already had an entry
     const signalCandlesWithEntry = new Set<number>();
+    // Track if price has traded above PE signal low / below CE signal high (required before entry)
+    let peSignalPriceAboveLow: boolean = false;
+    let ceSignalPriceBelowHigh: boolean = false;
 
     // Process each candle
     for (let i = emaPeriod; i < candles.length; i++) {
@@ -187,7 +190,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               time: candle.x
             };
             signals.push(currentPeSignal);
-            // Old signal candle is replaced, clear break level
+            // Old signal candle is replaced, reset price action tracking
+            peSignalPriceAboveLow = false;
+            // Clear entry tracking for old signal (new signal will start fresh)
+            signalCandlesWithEntry.delete(currentPeSignal.index);
             setPeBreakLevel(null);
           } else if (!currentPeSignal) {
             // First PE signal
@@ -199,6 +205,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               time: candle.x
             };
             signals.push(currentPeSignal);
+            // Reset price action tracking for new signal
+            peSignalPriceAboveLow = false;
+            // New signal candle starts fresh (no previous entries)
+            signalCandlesWithEntry.delete(currentPeSignal.index);
           }
         }
         // If RSI condition not met, log as ignored (only if no current signal exists)
@@ -230,7 +240,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               time: candle.x
             };
             signals.push(currentCeSignal);
-            // Old signal candle is replaced, clear break level
+            // Old signal candle is replaced, reset price action tracking
+            ceSignalPriceBelowHigh = false;
+            // Clear entry tracking for old signal (new signal will start fresh)
+            signalCandlesWithEntry.delete(currentCeSignal.index);
             setCeBreakLevel(null);
           } else if (!currentCeSignal) {
             // First CE signal
@@ -242,6 +255,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               time: candle.x
             };
             signals.push(currentCeSignal);
+            // Reset price action tracking for new signal
+            ceSignalPriceBelowHigh = false;
+            // New signal candle starts fresh (no previous entries)
+            signalCandlesWithEntry.delete(currentCeSignal.index);
           }
         }
         // If RSI condition not met, log as ignored (only if no current signal exists)
@@ -258,12 +275,36 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
         }
       }
 
+      // Track price action: Check if price has traded above PE signal low or below CE signal high
+      // This validation is only needed AFTER a trade exit (stop loss or target), not before first entry
+      if (currentPeSignal && !activeTradeEvent && !peSignalPriceAboveLow) {
+        // Check if price (high) has traded above PE signal candle's low
+        // Only check if no active trade (meaning we're waiting for re-entry after exit)
+        if (candleHigh > currentPeSignal.low) {
+          peSignalPriceAboveLow = true;
+        }
+      }
+      
+      if (currentCeSignal && !activeTradeEvent && !ceSignalPriceBelowHigh) {
+        // Check if price (low) has traded below CE signal candle's high
+        // Only check if no active trade (meaning we're waiting for re-entry after exit)
+        if (candleLow < currentCeSignal.high) {
+          ceSignalPriceBelowHigh = true;
+        }
+      }
+
       // Entry Triggers (only if no active trade)
       // RSI is checked only at signal identification, not at entry time
       if (!activeTradeEvent) {
         // PE Entry: Next candle CLOSE < signal candle LOW
-        if (currentPeSignal && candleClose < currentPeSignal.low) {
+        // For first entry: no price action validation needed
+        // For re-entry after exit: price must have previously traded ABOVE the signal candle's low
+        const isFirstEntry = !signalCandlesWithEntry.has(currentPeSignal?.index || -1);
+        const peEntryAllowed = isFirstEntry || peSignalPriceAboveLow;
+        
+        if (currentPeSignal && candleClose < currentPeSignal.low && peEntryAllowed) {
           // Entry taken - signal candle already validated with RSI at identification time
+          // and price action requirement met
           activeTradeEvent = {
             index: i,
             type: 'ENTRY',
@@ -275,10 +316,19 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
           trades.push(activeTradeEvent);
           signalCandlesWithEntry.add(currentPeSignal.index);
           setPeBreakLevel(currentPeSignal.low);
+          // Reset price action validation after entry (for next exit/entry cycle)
+          peSignalPriceAboveLow = false;
         }
         // CE Entry: Next candle CLOSE > signal candle HIGH
-        else if (currentCeSignal && candleClose > currentCeSignal.high) {
+        // For first entry: no price action validation needed
+        // For re-entry after exit: price must have previously traded BELOW the signal candle's high
+        else {
+          const isFirstEntry = !signalCandlesWithEntry.has(currentCeSignal?.index || -1);
+          const ceEntryAllowed = isFirstEntry || ceSignalPriceBelowHigh;
+          
+          if (currentCeSignal && candleClose > currentCeSignal.high && ceEntryAllowed) {
           // Entry taken - signal candle already validated with RSI at identification time
+          // and price action requirement met
           activeTradeEvent = {
             index: i,
             type: 'ENTRY',
@@ -287,9 +337,12 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             time: candle.x,
             signalCandleIndex: currentCeSignal.index
           };
-          trades.push(activeTradeEvent);
-          signalCandlesWithEntry.add(currentCeSignal.index);
-          setCeBreakLevel(currentCeSignal.high);
+            trades.push(activeTradeEvent);
+            signalCandlesWithEntry.add(currentCeSignal.index);
+            setCeBreakLevel(currentCeSignal.high);
+            // Reset price action validation after entry (for next exit/entry cycle)
+            ceSignalPriceBelowHigh = false;
+          }
         }
       }
 
@@ -299,6 +352,40 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
         if (!signalCandle) {
           activeTradeEvent = null;
           continue;
+        }
+
+        // Check for Market Close Square Off (15 minutes before market close at 3:30 PM)
+        // Square off at 3:15 PM (15:15) or later
+        const candleTime = new Date(candle.x);
+        const candleHour = candleTime.getHours();
+        const candleMinute = candleTime.getMinutes();
+        const marketCloseSquareOffHour = 15; // 3 PM
+        const marketCloseSquareOffMinute = 15; // 15 minutes
+        
+        // Check if current candle time is at or after 3:15 PM
+        if (candleHour > marketCloseSquareOffHour || 
+            (candleHour === marketCloseSquareOffHour && candleMinute >= marketCloseSquareOffMinute)) {
+          // Square off the trade at market close
+          const tradeType = activeTradeEvent.tradeType; // Save before nulling
+          trades.push({
+            index: i,
+            type: 'MKT_CLOSE',
+            tradeType: tradeType,
+            price: candleClose,
+            time: candle.x,
+            signalCandleIndex: signalCandle.index
+          });
+          activeTradeEvent = null;
+          // Keep signal active - don't reset it
+          if (tradeType === 'PE') {
+            setPeBreakLevel(null);
+          } else {
+            setCeBreakLevel(null);
+          }
+          consecutiveCandlesForTarget = 0;
+          lastCandleHighLessThanEMA = false;
+          lastCandleLowGreaterThanEMA = false;
+          continue; // Move to next candle
         }
 
         // Stop Loss for PE: Price closes above signal candle HIGH
@@ -313,6 +400,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
           });
           activeTradeEvent = null;
           // Keep currentPeSignal active - don't reset it, signal candle remains valid for next entry
+          // Reset price action validation after exit (for next entry)
+          peSignalPriceAboveLow = false;
           setPeBreakLevel(null);
           consecutiveCandlesForTarget = 0;
           lastCandleHighLessThanEMA = false;
@@ -329,6 +418,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
           });
           activeTradeEvent = null;
           // Keep currentCeSignal active - don't reset it, signal candle remains valid for next entry
+          // Reset price action validation after exit (for next entry)
+          ceSignalPriceBelowHigh = false;
           setCeBreakLevel(null);
           consecutiveCandlesForTarget = 0;
           lastCandleLowGreaterThanEMA = false;
@@ -351,6 +442,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               });
               activeTradeEvent = null;
               // Keep currentPeSignal active - don't reset it, signal candle remains valid for next entry
+              // Reset price action validation after exit (for next entry)
+              peSignalPriceAboveLow = false;
               setPeBreakLevel(null);
               consecutiveCandlesForTarget = 0;
               lastCandleHighLessThanEMA = false;
@@ -377,6 +470,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               });
               activeTradeEvent = null;
               // Keep currentCeSignal active - don't reset it, signal candle remains valid for next entry
+              // Reset price action validation after exit (for next entry)
+              ceSignalPriceBelowHigh = false;
               setCeBreakLevel(null);
               consecutiveCandlesForTarget = 0;
               lastCandleLowGreaterThanEMA = false;
@@ -406,7 +501,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
       exitIndex: number | null;
       exitTime: string | null;
       exitPrice: number | null;
-      exitType: 'STOP_LOSS' | 'TARGET' | null;
+      exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
       pnl: number | null;
       pnlPercent: number | null;
     } | null = null;
@@ -432,7 +527,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             pnlPercent: null
           };
         }
-      } else if (activeTradeHistory && (event.type === 'STOP_LOSS' || event.type === 'TARGET')) {
+      } else if (activeTradeHistory && (event.type === 'STOP_LOSS' || event.type === 'TARGET' || event.type === 'MKT_CLOSE')) {
         activeTradeHistory.exitIndex = event.index;
         activeTradeHistory.exitTime = event.time;
         activeTradeHistory.exitPrice = event.price;
@@ -566,7 +661,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
               <p className="mb-0 small"><strong>Entry:</strong> {formatDateTime(trade.entryTime)} @ {trade.entryPrice.toFixed(2)}</p>
               {trade.exitTime && (
                 <>
-                  <p className="mb-0 small"><strong>Exit:</strong> {formatDateTime(trade.exitTime)} @ {trade.exitPrice?.toFixed(2)} ({trade.exitType})</p>
+                  <p className="mb-0 small">
+                    <strong>Exit:</strong> {formatDateTime(trade.exitTime)} @ {trade.exitPrice?.toFixed(2)} 
+                    <span className="ms-1">({trade.exitType === 'MKT_CLOSE' ? 'Market Close' : trade.exitType})</span>
+                  </p>
                   {trade.pnl !== null && trade.pnlPercent !== null && (
                     <p className="mb-0 small fw-bold" style={{ color: trade.pnl >= 0 ? '#28a745' : '#dc3545' }}>
                       P&L: {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)} ({trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%)
@@ -701,13 +799,13 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                   </g>
                 )}
                 {/* Exit marker */}
-                {(tradeEvent?.type === 'STOP_LOSS' || tradeEvent?.type === 'TARGET') && (
+                {(tradeEvent?.type === 'STOP_LOSS' || tradeEvent?.type === 'TARGET' || tradeEvent?.type === 'MKT_CLOSE') && (
                   <g>
                     <circle
                       cx={centerX}
                       cy={yScale(tradeEvent.price)}
                       r={8}
-                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : '#ffc107'}
+                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : tradeEvent.type === 'MKT_CLOSE' ? '#6c757d' : '#ffc107'}
                       stroke="white"
                       strokeWidth={2}
                     />
@@ -715,11 +813,11 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                       x={centerX}
                       y={yScale(tradeEvent.price) - 12}
                       textAnchor="middle"
-                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : '#ffc107'}
+                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : tradeEvent.type === 'MKT_CLOSE' ? '#6c757d' : '#ffc107'}
                       fontSize="10"
                       fontWeight="bold"
                     >
-                      {tradeEvent.type === 'STOP_LOSS' ? 'SL' : 'TP'}
+                      {tradeEvent.type === 'STOP_LOSS' ? 'SL' : tradeEvent.type === 'MKT_CLOSE' ? 'MC' : 'TP'}
                     </text>
                   </g>
                 )}
@@ -1106,8 +1204,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                       <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : <span className="text-muted">-</span>}</td>
                       <td>
                         {trade.exitType ? (
-                          <span className={`badge ${trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 'bg-warning'}`}>
-                            {trade.exitType === 'STOP_LOSS' ? 'Stop Loss' : 'Target'}
+                          <span className={`badge ${
+                            trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
+                            trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 
+                            'bg-warning'
+                          }`}>
+                            {trade.exitType === 'STOP_LOSS' ? 'Stop Loss' : 
+                             trade.exitType === 'MKT_CLOSE' ? 'Market Close' : 
+                             'Target'}
                           </span>
                         ) : (
                           <span className="text-muted">-</span>
