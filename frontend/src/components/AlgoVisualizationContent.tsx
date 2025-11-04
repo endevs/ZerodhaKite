@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import MountainSignalFlowDiagram from './MountainSignalFlowDiagram';
 import ORBFlowDiagram from './ORBFlowDiagram';
+import MountainSignalChart from './MountainSignalChart';
 
 interface Strategy {
   id: number;
@@ -172,24 +173,28 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                 {/* Candlestick Chart Tab */}
                 {activeTab === 'chart' && (
                   <div className="tab-pane fade show active">
-                    <div className="card border-0 bg-light">
-                      <div className="card-body">
-                        <h5 className="card-title mb-3">
-                          <i className="bi bi-graph-up me-2 text-primary"></i>
-                          Real-time Candlestick Chart with Entry/Exit Logic
-                        </h5>
-                        <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
-                          <div className="text-center text-muted">
-                            <i className="bi bi-graph-up" style={{ fontSize: '4rem', opacity: 0.3 }}></i>
-                            <p className="mt-3">Candlestick chart with EMA and entry/exit indicators will be displayed here</p>
-                            <p className="small">
-                              Strategy: <strong>{selectedStrategy.strategy_name}</strong> |{' '}
-                              Instrument: <strong>{selectedStrategy.instrument}</strong>
-                            </p>
+                    {selectedStrategy.strategy_type === 'capture_mountain_signal' ? (
+                      <MountainSignalChart strategy={selectedStrategy} />
+                    ) : (
+                      <div className="card border-0 bg-light">
+                        <div className="card-body">
+                          <h5 className="card-title mb-3">
+                            <i className="bi bi-graph-up me-2 text-primary"></i>
+                            Candlestick Chart with Indicators
+                          </h5>
+                          <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
+                            <div className="text-center text-muted">
+                              <i className="bi bi-graph-up" style={{ fontSize: '4rem', opacity: 0.3 }}></i>
+                              <p className="mt-3">Candlestick chart for {selectedStrategy.strategy_type} will be implemented soon</p>
+                              <p className="small">
+                                Strategy: <strong>{selectedStrategy.strategy_name}</strong> |{' '}
+                                Instrument: <strong>{selectedStrategy.instrument}</strong>
+                              </p>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 )}
               </div>
