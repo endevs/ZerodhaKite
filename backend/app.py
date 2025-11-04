@@ -1288,6 +1288,81 @@ def connect(auth=None):
         # Always return True to avoid "write() before start_response" - errors are handled via emits
         return True  # Accept connection even on error
 
+@socketio.on('start_ticker')
+def handle_start_ticker(data=None):
+    """Handle request to start ticker after login"""
+    global ticker
+    try:
+        # Try to get session data - Flask-SocketIO should provide session access
+        user_id_from_session = None
+        access_token_from_session = None
+        try:
+            user_id_from_session = session.get('user_id')
+            access_token_from_session = session.get('access_token')
+        except Exception as e:
+            logging.error(f"Error accessing session in start_ticker: {e}", exc_info=True)
+            # Session might not be available in Socket.IO context, try alternative approach
+            # Use request context if available
+            try:
+                with app.test_request_context():
+                    user_id_from_session = session.get('user_id')
+                    access_token_from_session = session.get('access_token')
+            except Exception as e2:
+                logging.error(f"Error accessing session via test_request_context: {e2}", exc_info=True)
+        
+        # If still no session, check if credentials were passed in data
+        if (not user_id_from_session or not access_token_from_session) and data:
+            # Allow passing credentials via event data as fallback (less secure but works)
+            user_id_from_session = data.get('user_id') or user_id_from_session
+            access_token_from_session = data.get('access_token') or access_token_from_session
+        
+        if not user_id_from_session or not access_token_from_session:
+            logging.warning(f"start_ticker: user_id={user_id_from_session}, access_token={'present' if access_token_from_session else 'missing'}")
+            emit('error', {'message': 'Not logged in. Please log in first. Session may not be available in Socket.IO context.'})
+            return
+        
+        # Check if ticker is already running
+        if ticker is not None:
+            emit('info', {'message': 'Ticker is already running'})
+            return
+        
+        # Validate access token
+        try:
+            kite.set_access_token(access_token_from_session)
+            kite.profile()  # Validate the token
+        except Exception as e:
+            emit('error', {'message': f'Invalid access token: {str(e)}'})
+            return
+        
+        # Get user data
+        conn = get_db_connection()
+        try:
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id_from_session,)).fetchone()
+            if not user:
+                emit('error', {'message': 'User not found'})
+                return
+            
+            if not user['app_key']:
+                emit('error', {'message': 'Zerodha credentials not configured'})
+                return
+            
+            # Start ticker
+            ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
+            ticker.start()
+            logging.info("SocketIO: Ticker started via start_ticker event")
+            emit('info', {'message': 'Market data feed started successfully'})
+        except Exception as e:
+            logging.error(f"SocketIO: Error starting ticker via start_ticker event: {e}", exc_info=True)
+            emit('error', {'message': f'Failed to start market data feed: {str(e)}'})
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error in start_ticker handler: {e}", exc_info=True)
+        try:
+            emit('error', {'message': f'Error starting ticker: {str(e)}'})
+        except:
+            pass
+
 @socketio.on('disconnect')
 def disconnect():
     try:
@@ -1436,6 +1511,291 @@ def start_tick_collection():
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'})
+
+@app.route("/api/ticker/start", methods=['POST'])
+def api_start_ticker():
+    """HTTP endpoint to start the ticker after login"""
+    global ticker
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
+    
+    try:
+        # Check if ticker is already running
+        if ticker is not None:
+            return jsonify({'status': 'success', 'message': 'Ticker is already running'})
+        
+        # Validate access token
+        try:
+            kite.set_access_token(session['access_token'])
+            kite.profile()  # Validate the token
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': f'Invalid access token: {str(e)}'}), 401
+        
+        # Get user data
+        conn = get_db_connection()
+        try:
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+            if not user:
+                return jsonify({'status': 'error', 'message': 'User not found'}), 404
+            
+            if not user['app_key']:
+                return jsonify({'status': 'error', 'message': 'Zerodha credentials not configured'}), 400
+            
+            # Start ticker
+            ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
+            ticker.start()
+            logging.info("Ticker started via /api/ticker/start endpoint")
+            return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
+        except Exception as e:
+            logging.error(f"Error starting ticker via /api/ticker/start: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'message': f'Failed to start market data feed: {str(e)}'}), 500
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error in api_start_ticker: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error starting ticker: {str(e)}'}), 500
+
+@app.route("/api/market_snapshot", methods=['GET'])
+def api_market_snapshot():
+    """Return current snapshot prices for NIFTY and BANKNIFTY to avoid UI 'Loading...' before websocket ticks."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha not connected'}), 401
+
+    try:
+        kite.set_access_token(session['access_token'])
+        instruments = {
+            'NIFTY': 'NSE:NIFTY 50',
+            'BANKNIFTY': 'NSE:NIFTY BANK'
+        }
+        resp = kite.ltp(list(instruments.values()))
+        nifty = resp.get(instruments['NIFTY'], {}).get('last_price')
+        banknifty = resp.get(instruments['BANKNIFTY'], {}).get('last_price')
+        data = {
+            'status': 'success',
+            'nifty': float(nifty) if nifty is not None else None,
+            'banknifty': float(banknifty) if banknifty is not None else None
+        }
+        return jsonify(data)
+    except Exception as e:
+        logging.error(f"Error fetching market snapshot: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch snapshot'}), 500
+
+@app.route("/api/market_replay", methods=['POST'])
+def api_market_replay():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
+    
+    try:
+        if request.is_json:
+            data = request.get_json() or {}
+            strategy_type = data.get('strategy')  # Strategy type: 'orb' or 'capture_mountain_signal'
+            instrument_name = data.get('instrument') or data.get('instrument_name')
+            from_date_str = data.get('from-date')
+            to_date_str = data.get('to-date')
+            speed = float(data.get('speed', 1))
+        else:
+            strategy_type = request.form.get('strategy')
+            instrument_name = request.form.get('instrument') or request.form.get('instrument_name')
+            from_date_str = request.form.get('from-date')
+            to_date_str = request.form.get('to-date')
+            speed = float(request.form.get('speed', 1))
+
+        if not all([strategy_type, instrument_name, from_date_str, to_date_str]):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+        # Parse dates
+        from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+        to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+        
+        # Ensure to_date is after from_date
+        if to_date < from_date:
+            return jsonify({'status': 'error', 'message': 'To date must be after from date'}), 400
+        
+        # Set access token
+        kite.set_access_token(session['access_token'])
+        
+        # Get instrument token for index
+        if instrument_name.upper() == 'NIFTY':
+            instrument_token = 256265
+            instrument_display = 'NIFTY 50'
+        elif instrument_name.upper() == 'BANKNIFTY':
+            instrument_token = 260105
+            instrument_display = 'NIFTY BANK'
+        else:
+            return jsonify({'status': 'error', 'message': f'Unknown instrument: {instrument_name}'}), 400
+        
+        # Fetch historical candles from KiteConnect for all dates in range
+        all_candles = []
+        current_date = from_date
+        candle_interval = '5minute'  # Default 5-minute candles, can be made configurable
+        
+        while current_date <= to_date:
+            # Skip weekends
+            if current_date.weekday() < 5:  # Monday=0, Friday=4
+                start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+                end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+                
+                try:
+                    hist = kite.historical_data(instrument_token, start_dt, end_dt, candle_interval)
+                    if hist:
+                        all_candles.extend(hist)
+                except Exception as e:
+                    logging.error(f"Error fetching historical data for {current_date}: {e}")
+            
+            current_date += datetime.timedelta(days=1)
+        
+        if not all_candles:
+            return jsonify({'status': 'error', 'message': 'No historical data found for the selected date range'}), 404
+        
+        # Sort candles by date
+        all_candles.sort(key=lambda x: x['date'])
+        
+        # Create a default strategy configuration for replay
+        # These are defaults - in production, you might want to fetch from saved strategies
+        strategy_config = {
+            'strategy_type': strategy_type,
+            'instrument': instrument_name,
+            'candle_time': '5',  # Default 5 minutes
+            'start_time': '09:15',
+            'end_time': '15:30',
+            'stop_loss': '1.0',  # 1%
+            'target_profit': '1.5',  # 1.5%
+            'total_lot': 1,
+            'trailing_stop_loss': '0.5',
+            'segment': 'OPT',
+            'trade_type': 'INTRADAY',
+            'strike_price': 'ATM',
+            'expiry_type': 'WEEKLY',
+            'strategy_name': f'{strategy_type.upper()} Replay'
+        }
+        
+        # Get session ID for Socket.IO room
+        session_id = session.get('session_id', str(uuid.uuid4()))
+        if 'session_id' not in session:
+            session['session_id'] = session_id
+        
+        # Start replay using MarketReplayManager
+        replay_manager = get_market_replay_manager()
+        result = replay_manager.start_replay(
+            session_id=session_id,
+            user_id=session['user_id'],
+            strategy_data=strategy_config,
+            historical_candles=all_candles,
+            instrument_token=instrument_token,
+            instrument_display=instrument_display,
+            speed=speed
+        )
+        
+        if result.get('status') == 'error':
+            return jsonify(result), 400
+        
+        return jsonify({
+            'status': 'success', 
+            'message': 'Market replay started',
+            'session_id': session_id,
+            'speed': speed,
+            'total_candles': len(all_candles)
+        })
+    except ValueError as e:
+        logging.error(f"api_market_replay validation error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+    except Exception as e:
+        logging.error(f"api_market_replay error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to start market replay'}), 500
+
+# Global MarketReplayManager instance
+_replay_manager = None
+
+def get_market_replay_manager():
+    global _replay_manager
+    if _replay_manager is None:
+        from market_replay_manager import MarketReplayManager
+        _replay_manager = MarketReplayManager(socketio)
+    return _replay_manager
+
+# Socket.IO handlers for market replay controls
+@socketio.on('replay_pause')
+def handle_replay_pause():
+    """Handle pause request for market replay"""
+    try:
+        session_id = session.get('session_id')
+        if not session_id:
+            emit('replay_error', {'message': 'No active replay session'})
+            return
+        
+        replay_manager = get_market_replay_manager()
+        if replay_manager.pause_replay(session_id):
+            emit('replay_update', {'status': 'paused', 'message': 'Replay paused'})
+        else:
+            emit('replay_error', {'message': 'No active replay to pause'})
+    except Exception as e:
+        logging.error(f"Error pausing replay: {e}", exc_info=True)
+        emit('replay_error', {'message': f'Error pausing replay: {str(e)}'})
+
+@socketio.on('replay_resume')
+def handle_replay_resume(data):
+    """Handle resume request for market replay"""
+    try:
+        session_id = session.get('session_id')
+        if not session_id:
+            emit('replay_error', {'message': 'No active replay session'})
+            return
+        
+        speed = data.get('speed', 1.0) if data else 1.0
+        replay_manager = get_market_replay_manager()
+        if replay_manager.resume_replay(session_id, speed):
+            emit('replay_update', {'status': 'running', 'message': 'Replay resumed'})
+        else:
+            emit('replay_error', {'message': 'No paused replay to resume'})
+    except Exception as e:
+        logging.error(f"Error resuming replay: {e}", exc_info=True)
+        emit('replay_error', {'message': f'Error resuming replay: {str(e)}'})
+
+@socketio.on('replay_stop')
+def handle_replay_stop():
+    """Handle stop request for market replay"""
+    try:
+        session_id = session.get('session_id')
+        if not session_id:
+            emit('replay_error', {'message': 'No active replay session'})
+            return
+        
+        replay_manager = get_market_replay_manager()
+        if replay_manager.stop_replay(session_id):
+            emit('replay_update', {'status': 'stopped', 'message': 'Replay stopped'})
+        else:
+            emit('replay_error', {'message': 'No active replay to stop'})
+    except Exception as e:
+        logging.error(f"Error stopping replay: {e}", exc_info=True)
+        emit('replay_error', {'message': f'Error stopping replay: {str(e)}'})
+
+@socketio.on('replay_speed_change')
+def handle_replay_speed_change(data):
+    """Handle speed change request for market replay"""
+    try:
+        session_id = session.get('session_id')
+        if not session_id:
+            emit('replay_error', {'message': 'No active replay session'})
+            return
+        
+        speed = data.get('speed', 1.0) if data else 1.0
+        replay_manager = get_market_replay_manager()
+        if replay_manager.change_speed(session_id, speed):
+            emit('replay_update', {'status': 'running', 'speed': speed, 'message': f'Speed changed to {speed}x'})
+        else:
+            emit('replay_error', {'message': 'No active replay to change speed'})
+    except Exception as e:
+        logging.error(f"Error changing replay speed: {e}", exc_info=True)
+        emit('replay_error', {'message': f'Error changing replay speed: {str(e)}'})
 
 @app.route("/tick_data/pause", methods=['POST'])
 def pause_tick_collection():

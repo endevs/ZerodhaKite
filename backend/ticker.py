@@ -243,33 +243,52 @@ class Ticker:
                 if not instrument_token or last_price is None:
                     continue
                 
-                # Emit to market data rooms
+                # Emit market data to all connected clients
+                # Flask-SocketIO emits to all clients by default when called from server side
                 try:
-                    self.socketio.emit('market_data', {
-                        'instrument_token': instrument_token,
-                        'last_price': last_price,
-                        'timestamp': datetime.datetime.now().isoformat(),
-                        'volume': tick.get('volume', 0)
-                    }, namespace='/')
-                except Exception as e:
-                    logging.error(f"Error emitting market_data: {e}")
-                
-                # Legacy market data for dashboard - emit separately for backward compatibility
-                try:
+                    # Combine both formats in one emit for efficiency
                     if instrument_token == 256265: # NIFTY 50
-                        self.socketio.emit('market_data', {
+                        market_data = {
                             'nifty_price': str(last_price),
                             'instrument_token': instrument_token,
-                            'last_price': last_price
-                        }, namespace='/')
+                            'last_price': last_price,
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'volume': tick.get('volume', 0)
+                        }
+                        self.socketio.emit('market_data', market_data, namespace='/')
+                        # Log periodically to avoid spam (every 100 ticks or ~10 seconds)
+                        if hasattr(self, '_nifty_tick_count'):
+                            self._nifty_tick_count += 1
+                        else:
+                            self._nifty_tick_count = 1
+                        if self._nifty_tick_count % 100 == 0:
+                            logging.debug(f"Emitted NIFTY market_data: {last_price}")
                     elif instrument_token == 260105: # NIFTY BANK
-                        self.socketio.emit('market_data', {
+                        market_data = {
                             'banknifty_price': str(last_price),
                             'instrument_token': instrument_token,
-                            'last_price': last_price
+                            'last_price': last_price,
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'volume': tick.get('volume', 0)
+                        }
+                        self.socketio.emit('market_data', market_data, namespace='/')
+                        # Log periodically to avoid spam
+                        if hasattr(self, '_banknifty_tick_count'):
+                            self._banknifty_tick_count += 1
+                        else:
+                            self._banknifty_tick_count = 1
+                        if self._banknifty_tick_count % 100 == 0:
+                            logging.debug(f"Emitted BANKNIFTY market_data: {last_price}")
+                    else:
+                        # For other instruments, emit generic format
+                        self.socketio.emit('market_data', {
+                            'instrument_token': instrument_token,
+                            'last_price': last_price,
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'volume': tick.get('volume', 0)
                         }, namespace='/')
                 except Exception as e:
-                    logging.error(f"Error emitting legacy market_data: {e}")
+                    logging.error(f"Error emitting market_data for instrument {instrument_token}: {e}", exc_info=True)
         except Exception as e:
             logging.error(f"Error broadcasting ticks to frontend: {e}", exc_info=True)
 
@@ -277,17 +296,29 @@ class Ticker:
         logging.info("Kite Ticker connected")
         instrument_tokens = [256265, 260105] # NIFTY 50 and NIFTY BANK
 
-        # Get NIFTY weekly options
-        nifty_weekly_options = get_option_symbols(self.kite, 'NIFTY', 'weekly', 10)
-        instrument_tokens.extend(nifty_weekly_options)
+        # Get NIFTY weekly options (with error handling)
+        try:
+            nifty_weekly_options = get_option_symbols(self.kite, 'NIFTY', 'weekly', 10)
+            if nifty_weekly_options:
+                instrument_tokens.extend(nifty_weekly_options)
+        except Exception as e:
+            logging.warning(f"Error fetching NIFTY weekly options: {e}")
 
-        # Get NIFTY next weekly options
-        nifty_next_weekly_options = get_option_symbols(self.kite, 'NIFTY', 'next_weekly', 10)
-        instrument_tokens.extend(nifty_next_weekly_options)
+        # Get NIFTY next weekly options (with error handling)
+        try:
+            nifty_next_weekly_options = get_option_symbols(self.kite, 'NIFTY', 'next_weekly', 10)
+            if nifty_next_weekly_options:
+                instrument_tokens.extend(nifty_next_weekly_options)
+        except Exception as e:
+            logging.warning(f"Error fetching NIFTY next weekly options: {e}")
 
-        # Get BANKNIFTY monthly options
-        banknifty_monthly_options = get_option_symbols(self.kite, 'BANKNIFTY', 'monthly', 10)
-        instrument_tokens.extend(banknifty_monthly_options)
+        # Get BANKNIFTY monthly options (with error handling)
+        try:
+            banknifty_monthly_options = get_option_symbols(self.kite, 'BANKNIFTY', 'monthly', 10)
+            if banknifty_monthly_options:
+                instrument_tokens.extend(banknifty_monthly_options)
+        except Exception as e:
+            logging.warning(f"Error fetching BANKNIFTY monthly options: {e}")
 
         for strategy_info in self.running_strategies.values():
             instrument_tokens.append(strategy_info['strategy'].instrument_token)
@@ -312,4 +343,10 @@ class Ticker:
         logging.info(f"Kite Ticker connection closed: {code} - {reason}")
 
     def start(self):
-        self.kws.connect(threaded=True)
+        try:
+            logging.info("Starting Kite Ticker...")
+            self.kws.connect(threaded=True)
+            logging.info("Kite Ticker start() called successfully")
+        except Exception as e:
+            logging.error(f"Error starting Kite Ticker: {e}", exc_info=True)
+            raise

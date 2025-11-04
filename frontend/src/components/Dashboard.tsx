@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Layout from './Layout';
 import Navigation from './Navigation';
 import { io, Socket } from 'socket.io-client';
@@ -22,6 +22,7 @@ const Dashboard: React.FC = () => {
   const [chartInstrumentToken, setChartInstrumentToken] = useState<string | undefined>(undefined);
   const [showLiveStrategyModal, setShowLiveStrategyModal] = useState<boolean>(false);
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   const handleViewChart = useCallback((instrumentToken: string) => {
     setChartInstrumentToken(instrumentToken);
@@ -51,7 +52,26 @@ const Dashboard: React.FC = () => {
         if (response.ok) {
           setUserName(data.user_name || 'User');
           setBalance(data.balance ? data.balance.toFixed(2) : '0.00');
-          setAccessToken(data.access_token_present || false);
+          const hasAccessToken = data.access_token_present || false;
+          setAccessToken(hasAccessToken);
+          
+          // If access token was just set (user just logged in), request ticker startup via HTTP
+          if (hasAccessToken) {
+            console.log('Access token detected - requesting ticker startup via HTTP...');
+            fetch('http://localhost:8000/api/ticker/start', {
+              method: 'POST',
+              credentials: 'include'
+            })
+              .then(response => response.json())
+              .then(result => {
+                if (result.status === 'success') {
+                  console.log('Ticker started successfully:', result.message);
+                } else {
+                  console.error('Failed to start ticker:', result.message);
+                }
+              })
+              .catch(err => console.error('Error starting ticker:', err));
+          }
         } else {
           console.error('Error fetching user data:', data.message);
         }
@@ -61,10 +81,13 @@ const Dashboard: React.FC = () => {
     };
 
     const fetchInitialMarketData = async () => {
-      // Try to get initial market data if available
       try {
-        // This could be an API endpoint if you add one, or use WebSocket only
-        // For now, rely on WebSocket
+        const resp = await fetch('http://localhost:8000/api/market_snapshot', { credentials: 'include' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'success') {
+          if (typeof data.nifty === 'number') setNiftyPrice(data.nifty.toFixed(2));
+          if (typeof data.banknifty === 'number') setBankNiftyPrice(data.banknifty.toFixed(2));
+        }
       } catch (error) {
         console.error('Error fetching initial market data:', error);
       }
@@ -72,6 +95,11 @@ const Dashboard: React.FC = () => {
 
     fetchUserData();
     fetchInitialMarketData();
+    
+    // Also check periodically if access token becomes available (after login)
+    const checkAccessTokenInterval = setInterval(() => {
+      fetchUserData();
+    }, 5000); // Check every 5 seconds
 
     const socket: Socket = io('http://localhost:8000', {
       transports: ['polling'],
@@ -82,10 +110,38 @@ const Dashboard: React.FC = () => {
       timeout: 20000,
       forceNew: false
     });
+    
+    socketRef.current = socket;
 
     socket.on('connect', () => {
       console.log('Connected to WebSocket');
       socket.emit('my_event', { data: 'I\'m connected!' });
+      
+      // Request ticker startup if user is logged in and has access token
+      // Check if access token is present and start ticker via HTTP endpoint
+      fetch('http://localhost:8000/api/user-data', { credentials: 'include' })
+        .then(response => response.json())
+        .then(data => {
+          if (data.access_token_present) {
+            console.log('Requesting ticker startup via HTTP endpoint...');
+            fetch('http://localhost:8000/api/ticker/start', {
+              method: 'POST',
+              credentials: 'include'
+            })
+              .then(response => response.json())
+              .then(result => {
+                if (result.status === 'success') {
+                  console.log('Ticker started successfully:', result.message);
+                } else {
+                  console.error('Failed to start ticker:', result.message);
+                }
+              })
+              .catch(err => console.error('Error starting ticker:', err));
+          } else {
+            console.log('No access token found - user not logged in or Zerodha not connected');
+          }
+        })
+        .catch(err => console.error('Error checking access token:', err));
     });
 
     socket.on('disconnect', (reason: string) => {
@@ -145,6 +201,30 @@ const Dashboard: React.FC = () => {
       }
     });
 
+    socket.on('info', (msg: { message: string }) => {
+      console.log('SocketIO info:', msg.message);
+      if (msg.message.includes('Market data feed started') || msg.message.includes('Ticker is already running')) {
+        // Ticker started successfully, market data should start flowing
+        console.log('Ticker started - waiting for market data...');
+      }
+    });
+
+    socket.on('error', (msg: { message: string }) => {
+      console.error('SocketIO error:', msg.message);
+      if (msg.message.includes('Failed to start market data feed')) {
+        setNiftyPrice('Error');
+        setBankNiftyPrice('Error');
+      }
+    });
+
+    socket.on('warning', (msg: { message: string }) => {
+      console.warn('SocketIO warning:', msg.message);
+      if (msg.message.includes('Zerodha session expired') || msg.message.includes('Zerodha credentials not configured')) {
+        setNiftyPrice('Not Connected');
+        setBankNiftyPrice('Not Connected');
+      }
+    });
+
     // Set timeout to show warning if no data received after 10 seconds
     const timeoutId = setTimeout(() => {
       console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
@@ -152,7 +232,11 @@ const Dashboard: React.FC = () => {
 
     return () => {
       clearTimeout(timeoutId);
-      socket.disconnect();
+      clearInterval(checkAccessTokenInterval);
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
     };
   }, []);
 

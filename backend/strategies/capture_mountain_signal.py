@@ -113,6 +113,10 @@ class CaptureMountainSignal(BaseStrategy):
 
     def _get_option_instruments_for_monitoring(self, ltp):
         """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)"""
+        # Skip option monitoring during replay (when kite is None)
+        if self.kite is None:
+            return {}
+        
         try:
             instruments = self.kite.instruments('NFO')
             
@@ -193,6 +197,10 @@ class CaptureMountainSignal(BaseStrategy):
     
     def _update_option_prices(self):
         """Fetch and update option prices (ATM, ATM+2, ATM-2) from Kite API"""
+        # Skip option price updates during replay (when kite is None)
+        if self.kite is None:
+            return
+        
         try:
             current_ltp = self.status.get('current_ltp', 0)
             if current_ltp == 0:
@@ -253,6 +261,10 @@ class CaptureMountainSignal(BaseStrategy):
     
     def _get_atm_option_symbol(self, ltp, option_type):
         """Get ATM option symbol and instrument token for trading"""
+        # Skip during replay (when kite is None)
+        if self.kite is None:
+            return None, None
+        
         try:
             # Get option symbols for ATM +/- 2 strikes
             option_tokens = get_option_symbols(self.kite, self.instrument, self.expiry_type, 2)
