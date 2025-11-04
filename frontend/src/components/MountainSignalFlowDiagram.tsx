@@ -140,7 +140,10 @@ const MountainSignalFlowDiagram: React.FC<MountainSignalFlowDiagramProps> = ({ s
             <strong>Instruments:</strong> {strategy.instrument} ATM Options<br/>
             <strong>Timeframe:</strong> {candleTime} candles<br/>
             <strong>Indicator:</strong> {emaPeriod}-period EMA<br/>
-            <strong>Execution:</strong> Every {candleTime} - 20 seconds<br/>
+            <strong>Execution Timing:</strong> Every {candleTime} interval, 20 seconds before candle close<br/>
+            <small style={{ display: 'block', marginTop: '5px', opacity: 0.9 }}>
+              (e.g., 9:19:40, 9:24:40, 9:29:40 - pattern repeats every 5 minutes)
+            </small>
             <strong>Position Limit:</strong> One active signal & one trade at a time
           </div>
         </div>
@@ -151,8 +154,8 @@ const MountainSignalFlowDiagram: React.FC<MountainSignalFlowDiagramProps> = ({ s
         <div className="flow-column">
           <div className="flow-box process">
             <strong>Strategy Execution</strong><br/>
-            Every {candleTime} - 20 seconds<br/>
-            (e.g., 9:19:40, 9:24:40)
+            Every {candleTime} interval, 20 seconds before candle close<br/>
+            <small>(Pattern: 9:19:40, 9:24:40, 9:29:40, ...)</small>
           </div>
           <div className="flow-arrow">↓</div>
           <div className="flow-box decision">
