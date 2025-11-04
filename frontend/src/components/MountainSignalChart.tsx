@@ -44,6 +44,16 @@ interface TradeEvent {
   signalCandleIndex: number;
 }
 
+interface IgnoredSignal {
+  index: number;
+  signalTime: string;
+  signalType: 'PE' | 'CE';
+  signalHigh: number;
+  signalLow: number;
+  reason: string;
+  rsiValue: number | null;
+}
+
 interface MountainSignalChartProps {
   strategy: Strategy;
 }
@@ -57,7 +67,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
   const [tradeEvents, setTradeEvents] = useState<TradeEvent[]>([]);
   const [peBreakLevel, setPeBreakLevel] = useState<number | null>(null);
   const [ceBreakLevel, setCeBreakLevel] = useState<number | null>(null);
-  const [chartType, setChartType] = useState<'candlestick' | 'line'>('candlestick');
+  const [chartType, setChartType] = useState<'candlestick' | 'line'>('line');
+  const [ignoredSignals, setIgnoredSignals] = useState<IgnoredSignal[]>([]);
   const [tradeHistory, setTradeHistory] = useState<Array<{
     signalIndex: number;
     signalTime: string;
@@ -130,6 +141,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
   const processMountainSignalLogic = (data: ChartDataResponse) => {
     const candles = data.candles;
     const ema5Values = data.ema5.map(e => e.y).filter(v => v !== null && v !== undefined) as number[];
+    const rsi14Values = data.rsi14 ? data.rsi14.map(e => e.y).filter(v => v !== null && v !== undefined) as number[] : [];
     
     if (candles.length < emaPeriod + 1 || ema5Values.length < emaPeriod + 1) {
       return; // Not enough data
@@ -137,6 +149,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
 
     const signals: SignalCandle[] = [];
     const trades: TradeEvent[] = [];
+    const ignored: IgnoredSignal[] = [];
     let currentPeSignal: SignalCandle | null = null;
     let currentCeSignal: SignalCandle | null = null;
     let activeTradeEvent: TradeEvent | null = null;
@@ -208,31 +221,66 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
 
       // Entry Triggers (only if no active trade)
       if (!activeTradeEvent) {
-        // PE Entry: Next candle CLOSE < signal candle LOW
+        // Get RSI value for current candle
+        const currentRsi = rsi14Values.length > i ? rsi14Values[i] : null;
+        
+        // PE Entry: Next candle CLOSE < signal candle LOW AND RSI > 70
         if (currentPeSignal && candleClose < currentPeSignal.low) {
-          activeTradeEvent = {
-            index: i,
-            type: 'ENTRY',
-            tradeType: 'PE',
-            price: candleClose,
-            time: candle.x,
-            signalCandleIndex: currentPeSignal.index
-          };
-          trades.push(activeTradeEvent);
-          setPeBreakLevel(currentPeSignal.low);
+          if (currentRsi !== null && currentRsi > 70) {
+            // RSI condition satisfied - execute entry
+            activeTradeEvent = {
+              index: i,
+              type: 'ENTRY',
+              tradeType: 'PE',
+              price: candleClose,
+              time: candle.x,
+              signalCandleIndex: currentPeSignal.index
+            };
+            trades.push(activeTradeEvent);
+            setPeBreakLevel(currentPeSignal.low);
+          } else {
+            // RSI condition not met - log as ignored signal
+            ignored.push({
+              index: currentPeSignal.index,
+              signalTime: currentPeSignal.time,
+              signalType: 'PE',
+              signalHigh: currentPeSignal.high,
+              signalLow: currentPeSignal.low,
+              reason: `Signal identified but RSI condition not met (RSI must be > 70, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+              rsiValue: currentRsi
+            });
+            // Reset signal since entry was not taken
+            currentPeSignal = null;
+          }
         }
-        // CE Entry: Next candle CLOSE > signal candle HIGH
+        // CE Entry: Next candle CLOSE > signal candle HIGH AND RSI < 30
         else if (currentCeSignal && candleClose > currentCeSignal.high) {
-          activeTradeEvent = {
-            index: i,
-            type: 'ENTRY',
-            tradeType: 'CE',
-            price: candleClose,
-            time: candle.x,
-            signalCandleIndex: currentCeSignal.index
-          };
-          trades.push(activeTradeEvent);
-          setCeBreakLevel(currentCeSignal.high);
+          if (currentRsi !== null && currentRsi < 30) {
+            // RSI condition satisfied - execute entry
+            activeTradeEvent = {
+              index: i,
+              type: 'ENTRY',
+              tradeType: 'CE',
+              price: candleClose,
+              time: candle.x,
+              signalCandleIndex: currentCeSignal.index
+            };
+            trades.push(activeTradeEvent);
+            setCeBreakLevel(currentCeSignal.high);
+          } else {
+            // RSI condition not met - log as ignored signal
+            ignored.push({
+              index: currentCeSignal.index,
+              signalTime: currentCeSignal.time,
+              signalType: 'CE',
+              signalHigh: currentCeSignal.high,
+              signalLow: currentCeSignal.low,
+              reason: `Signal identified but RSI condition not met (RSI must be < 30, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+              rsiValue: currentRsi
+            });
+            // Reset signal since entry was not taken
+            currentCeSignal = null;
+          }
         }
       }
 
@@ -333,6 +381,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
 
     setSignalCandles(signals);
     setTradeEvents(trades);
+    setIgnoredSignals(ignored);
 
     // Build trade history for table
     const history: typeof tradeHistory = [];
@@ -416,6 +465,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
   const chartDataFormatted = useMemo(() => {
     return chartData.candles.map((candle, index) => {
       const ema5Value = chartData.ema5?.[index]?.y ?? null;
+      const rsi14Value = chartData.rsi14?.[index]?.y ?? null;
       const signalCandle = signalCandles.find(s => s.index === index);
       const tradeEvent = tradeEvents.find(t => t.index === index);
 
@@ -427,6 +477,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
         low: candle.l,
         close: candle.c,
         ema5: ema5Value,
+        rsi14: rsi14Value,
         isSignalCandle: !!signalCandle,
         signalType: signalCandle?.type || null,
         tradeEvent: tradeEvent || null,
@@ -465,6 +516,15 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
           {data.ema5 && (
             <p className="mb-2 small border-top pt-2" style={{ color: '#ff6b35' }}>
               <strong>EMA {emaPeriod}:</strong> {data.ema5.toFixed(2)}
+            </p>
+          )}
+
+          {/* RSI */}
+          {data.rsi14 !== null && data.rsi14 !== undefined && (
+            <p className="mb-2 small border-top pt-2" style={{ color: '#82ca9d' }}>
+              <strong>RSI 14:</strong> {data.rsi14.toFixed(2)}
+              {data.rsi14 > 70 && <span className="ms-2 text-danger">(Overbought)</span>}
+              {data.rsi14 < 30 && <span className="ms-2 text-success">(Oversold)</span>}
             </p>
           )}
 
@@ -787,6 +847,17 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                     style={{ fontSize: '12px' }}
                     domain={['dataMin - 10', 'dataMax + 10']}
                   />
+                  {/* RSI YAxis (0-100 scale) */}
+                  {chartDataFormatted.some(c => c.rsi14 !== null && c.rsi14 !== undefined) && (
+                    <YAxis
+                      yAxisId="rsi"
+                      orientation="right"
+                      stroke="#82ca9d"
+                      style={{ fontSize: '12px' }}
+                      domain={[0, 100]}
+                      label={{ value: 'RSI', angle: -90, position: 'insideRight' }}
+                    />
+                  )}
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />
                   
@@ -801,6 +872,28 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
                       name={`EMA ${emaPeriod}`}
                       connectNulls={false}
                     />
+                  )}
+
+                  {/* RSI 14 Line (on separate Y-axis) */}
+                  {chartDataFormatted.some(c => c.rsi14 !== null && c.rsi14 !== undefined) && (
+                    <Line
+                      type="monotone"
+                      dataKey="rsi14"
+                      stroke="#82ca9d"
+                      strokeWidth={2}
+                      dot={false}
+                      name="RSI 14"
+                      connectNulls={false}
+                      yAxisId="rsi"
+                    />
+                  )}
+
+                  {/* RSI 14 Reference Lines (Thresholds) */}
+                  {chartDataFormatted.some(c => c.rsi14 !== null && c.rsi14 !== undefined) && (
+                    <>
+                      <ReferenceLine yAxisId="rsi" y={70} stroke="#dc3545" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'RSI 70 (PE Entry)', position: 'right', fill: '#dc3545' }} />
+                      <ReferenceLine yAxisId="rsi" y={30} stroke="#28a745" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'RSI 30 (CE Entry)', position: 'right', fill: '#28a745' }} />
+                    </>
                   )}
 
                   {/* PE Break Level Reference Line */}
@@ -897,6 +990,62 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
           <div className="card-body text-center py-5">
             <i className="bi bi-graph-up" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
             <p className="mt-3 text-muted">Select a date and click "Load Chart" to view the Mountain Signal strategy visualization</p>
+          </div>
+        </div>
+      )}
+
+      {/* Ignored Signals Table */}
+      {ignoredSignals.length > 0 && (
+        <div className="card border-0 shadow-sm mt-3">
+          <div className="card-header bg-warning text-dark">
+            <h5 className="card-title mb-0">
+              <i className="bi bi-exclamation-triangle me-2"></i>
+              Ignored Signals (RSI Condition Not Met)
+            </h5>
+          </div>
+          <div className="card-body">
+            <div className="table-responsive">
+              <table className="table table-hover table-striped">
+                <thead className="table-warning">
+                  <tr>
+                    <th>#</th>
+                    <th>Signal Time</th>
+                    <th>Signal Type</th>
+                    <th>Signal High</th>
+                    <th>Signal Low</th>
+                    <th>RSI Value</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ignoredSignals.map((signal, index) => (
+                    <tr key={index}>
+                      <td><strong>{index + 1}</strong></td>
+                      <td>{formatDateTime(signal.signalTime)}</td>
+                      <td>
+                        <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                          {signal.signalType}
+                        </span>
+                      </td>
+                      <td>{signal.signalHigh.toFixed(2)}</td>
+                      <td>{signal.signalLow.toFixed(2)}</td>
+                      <td>
+                        {signal.rsiValue !== null ? (
+                          <span className={signal.signalType === 'PE' && signal.rsiValue <= 70 ? 'text-danger' : signal.signalType === 'CE' && signal.rsiValue >= 30 ? 'text-danger' : 'text-muted'}>
+                            {signal.rsiValue.toFixed(2)}
+                          </span>
+                        ) : (
+                          <span className="text-muted">N/A</span>
+                        )}
+                      </td>
+                      <td>
+                        <small className="text-muted">{signal.reason}</small>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
