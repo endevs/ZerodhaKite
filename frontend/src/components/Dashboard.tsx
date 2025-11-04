@@ -3,6 +3,7 @@ import Layout from './Layout';
 import Navigation from './Navigation';
 import { io, Socket } from 'socket.io-client';
 import DashboardContent from './DashboardContent';
+import AlgoVisualizationContent from './AlgoVisualizationContent';
 import BacktestContent from './BacktestContent';
 import MarketReplayContent from './MarketReplayContent';
 import TickDataContent from './TickDataContent';
@@ -268,6 +269,8 @@ const Dashboard: React.FC = () => {
             onViewChart={handleViewChart} // This will be passed down to TickDataContent eventually
           />
         );
+      case 'algo-visualization':
+        return <AlgoVisualizationContent />;
       case 'backtest':
         return <BacktestContent />;
       case 'market-replay':
