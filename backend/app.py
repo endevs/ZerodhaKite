@@ -193,12 +193,51 @@ def api_chart_data():
         }
         kite_interval = interval_map.get(interval, '5minute')
 
-        # Fetch historical data from Kite
+        # Get previous trading day for RSI calculation (need at least 14 periods)
+        # Calculate how many candles we need based on interval
+        interval_minutes = {
+            '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '60m': 60
+        }.get(interval, 5)
+        
+        # Need at least 14 candles for RSI 14, fetch 20 to be safe
+        candles_needed = 20
+        minutes_needed = candles_needed * interval_minutes
+        
+        # Get previous trading day (skip weekends)
+        prev_date = selected_date
+        days_back = 0
+        while days_back < 5:  # Max 5 days back to find a trading day
+            prev_date = prev_date - datetime.timedelta(days=1)
+            days_back += 1
+            # Skip weekends (Saturday=5, Sunday=6)
+            if prev_date.weekday() < 5:
+                break
+        
+        # Fetch previous day's data (last portion of trading session)
+        prev_start_dt = datetime.datetime.combine(prev_date, datetime.time(15, 30)) - datetime.timedelta(minutes=minutes_needed)
+        prev_end_dt = datetime.datetime.combine(prev_date, datetime.time(15, 30))
+        
+        # Fetch historical data from Kite (today's data)
         try:
-            hist = kite.historical_data(token, start_dt, end_dt, kite_interval)
+            hist_today = kite.historical_data(token, start_dt, end_dt, kite_interval)
         except Exception as e:
-            logging.error(f"Error fetching historical data: {e}")
+            logging.error(f"Error fetching historical data for today: {e}")
             return jsonify({'candles': [], 'ema': []})
+        
+        # Fetch previous day's data for RSI warm-up
+        hist_prev = []
+        try:
+            hist_prev = kite.historical_data(token, prev_start_dt, prev_end_dt, kite_interval)
+            # Only take the last portion (last 20 candles)
+            if len(hist_prev) > candles_needed:
+                hist_prev = hist_prev[-candles_needed:]
+        except Exception as e:
+            logging.warning(f"Could not fetch previous day's data for RSI warm-up: {e}. RSI will start from candle {candles_needed + 1}")
+            hist_prev = []
+        
+        # Combine: previous day's data first, then today's data
+        # This ensures RSI calculation has enough historical data
+        hist = hist_prev + hist_today
 
         # Prepare candles and compute indicators
         candles = []
@@ -260,12 +299,26 @@ def api_chart_data():
             ema5_vals = compute_ema(closes, 5)
             ema20_vals = compute_ema(closes, 20)
             rsi_vals = compute_rsi(closes, 14)
-            for i in range(len(candles)):
-                ema5.append({'x': candles[i]['x'], 'y': float(ema5_vals[i]) if i < len(ema5_vals) else None})
-                ema20.append({'x': candles[i]['x'], 'y': float(ema20_vals[i]) if i < len(ema20_vals) else None})
-                rsi14.append({'x': candles[i]['x'], 'y': float(rsi_vals[i]) if rsi_vals[i] is not None else None})
-
-        return jsonify({'candles': candles, 'ema5': ema5, 'ema20': ema20, 'rsi14': rsi14})
+            
+            # Separate today's candles from previous day's warm-up data
+            # Only return today's candles and indicators
+            prev_count = len(hist_prev)
+            today_candles = candles[prev_count:]
+            today_ema5_vals = ema5_vals[prev_count:]
+            today_ema20_vals = ema20_vals[prev_count:]
+            today_rsi_vals = rsi_vals[prev_count:]
+            
+            # Build response with only today's data
+            for i in range(len(today_candles)):
+                ema5.append({'x': today_candles[i]['x'], 'y': float(today_ema5_vals[i]) if i < len(today_ema5_vals) else None})
+                ema20.append({'x': today_candles[i]['x'], 'y': float(today_ema20_vals[i]) if i < len(today_ema20_vals) else None})
+                # RSI should now be available from first candle of today (index 0)
+                rsi14.append({'x': today_candles[i]['x'], 'y': float(today_rsi_vals[i]) if i < len(today_rsi_vals) and today_rsi_vals[i] is not None else None})
+            
+            # Return today's candles (not the combined dataset)
+            return jsonify({'candles': today_candles, 'ema5': ema5, 'ema20': ema20, 'rsi14': rsi14})
+        
+        return jsonify({'candles': [], 'ema5': [], 'ema20': [], 'rsi14': []})
     except Exception as e:
         logging.error(f"/api/chart_data error: {e}", exc_info=True)
         return jsonify({'candles': [], 'ema': []}), 200
