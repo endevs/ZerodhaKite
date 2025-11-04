@@ -179,8 +179,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
       if (candleLow > ema5) {
         // RSI condition must be met at signal identification time
         if (currentRsi !== null && currentRsi > 70) {
-          // Check for reset condition: new signal candle replaces old one
-          if (currentPeSignal && prevCandleClose > currentPeSignal.high && candleLow > ema5) {
+          // Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > 70), 
+          // it REPLACES the previous PE signal candle
+          if (currentPeSignal) {
             // New PE signal candle identified - old signal candle is now invalid
             currentPeSignal = {
               index: i,
@@ -195,7 +196,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             // Clear entry tracking for old signal (new signal will start fresh)
             signalCandlesWithEntry.delete(currentPeSignal.index);
             setPeBreakLevel(null);
-          } else if (!currentPeSignal) {
+          } else {
             // First PE signal
             currentPeSignal = {
               index: i,
@@ -229,8 +230,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
       if (candleHigh < ema5) {
         // RSI condition must be met at signal identification time
         if (currentRsi !== null && currentRsi < 30) {
-          // Check for reset condition: new signal candle replaces old one
-          if (currentCeSignal && prevCandleClose < currentCeSignal.low && candleHigh < ema5) {
+          // Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < 30), 
+          // it REPLACES the previous CE signal candle
+          if (currentCeSignal) {
             // New CE signal candle identified - old signal candle is now invalid
             currentCeSignal = {
               index: i,
@@ -245,7 +247,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy }) =
             // Clear entry tracking for old signal (new signal will start fresh)
             signalCandlesWithEntry.delete(currentCeSignal.index);
             setCeBreakLevel(null);
-          } else if (!currentCeSignal) {
+          } else {
             // First CE signal
             currentCeSignal = {
               index: i,

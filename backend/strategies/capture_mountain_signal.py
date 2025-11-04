@@ -1,5 +1,6 @@
 from .base_strategy import BaseStrategy
 from utils.kite_utils import get_option_symbols
+from utils.indicators import calculate_rsi
 import logging
 import datetime
 import pandas as pd
@@ -479,6 +480,12 @@ class CaptureMountainSignal(BaseStrategy):
     def _apply_strategy_logic(self):
         df = pd.DataFrame(self.historical_data)
         df['ema'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
+        
+        # Calculate RSI 14 for signal identification
+        if len(df) >= 15:  # Need at least 15 candles for RSI 14
+            df['rsi14'] = calculate_rsi(df['close'], period=14)
+        else:
+            df['rsi14'] = None
 
         # Ensure we have at least two candles for signal/entry logic
         if len(df) < 2:
@@ -489,13 +496,24 @@ class CaptureMountainSignal(BaseStrategy):
         previous_candle = df.iloc[-2]
         current_ema = current_candle['ema']
         previous_ema = previous_candle['ema']
+        previous_rsi = df.iloc[-2]['rsi14'] if 'rsi14' in df.columns else None
 
         # --- Signal Identification and Reset ---
-        # PE Signal Candle Identification
+        # PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70
         if previous_candle['low'] > previous_ema:
-            # Check for signal reset condition for PE
-            if self.pe_signal_candle is None or \
-               (current_candle['close'] > self.pe_signal_candle['high'] and current_candle['low'] > current_ema):
+            # RSI condition must be met at signal identification time
+            if previous_rsi is not None and previous_rsi > 70:
+                # Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > 70), 
+                # it REPLACES the previous PE signal candle
+                if self.pe_signal_candle is not None:
+                    # New PE signal candle replaces old one
+                    # Reset price action validation and entry tracking
+                    self.pe_signal_price_above_low = False
+                    # Clear entry tracking for old signal
+                    signal_candle_id = id(self.pe_signal_candle)
+                    if signal_candle_id in self.signal_candles_with_entry:
+                        self.signal_candles_with_entry.remove(signal_candle_id)
+                
                 self.pe_signal_candle = previous_candle
                 self.status['signal_status'] = f"PE Signal Candle Identified: {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.pe_signal_candle['date'].strftime('%H:%M') + '-' + (self.pe_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
@@ -525,11 +543,21 @@ class CaptureMountainSignal(BaseStrategy):
                     pass
                 logging.info(self.status['signal_status'])
 
-        # CE Signal Candle Identification
+        # CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30
         if previous_candle['high'] < previous_ema:
-            # Check for signal reset condition for CE
-            if self.ce_signal_candle is None or \
-               (current_candle['close'] < self.ce_signal_candle['low'] and current_candle['high'] < current_ema):
+            # RSI condition must be met at signal identification time
+            if previous_rsi is not None and previous_rsi < 30:
+                # Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < 30), 
+                # it REPLACES the previous CE signal candle
+                if self.ce_signal_candle is not None:
+                    # New CE signal candle replaces old one
+                    # Reset price action validation and entry tracking
+                    self.ce_signal_price_below_high = False
+                    # Clear entry tracking for old signal
+                    signal_candle_id = id(self.ce_signal_candle)
+                    if signal_candle_id in self.signal_candles_with_entry:
+                        self.signal_candles_with_entry.remove(signal_candle_id)
+                
                 self.ce_signal_candle = previous_candle
                 self.status['signal_status'] = f"CE Signal Candle Identified: {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.ce_signal_candle['date'].strftime('%H:%M') + '-' + (self.ce_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
