@@ -82,9 +82,65 @@ kite = KiteConnect(api_key="default_api_key") # The API key will be set dynamica
 
 # In-memory storage for running strategies
 running_strategies = {}
+paper_trade_strategies = {}  # Store paper trade strategy instances
 
 # Ticker instance
 ticker = None
+
+# Initialize paper trade tables on startup
+def init_paper_trade_tables():
+    """Create paper trade tables if they don't exist"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Create paper_trade_sessions table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trade_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                strategy_id INTEGER NOT NULL,
+                strategy_name TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                expiry_type TEXT NOT NULL,
+                candle_time TEXT NOT NULL,
+                ema_period INTEGER,
+                started_at DATETIME NOT NULL,
+                stopped_at DATETIME,
+                status TEXT NOT NULL DEFAULT 'running',
+                total_trades INTEGER DEFAULT 0,
+                total_pnl REAL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                FOREIGN KEY (strategy_id) REFERENCES strategies (id)
+            )
+        """)
+        
+        # Create paper_trade_audit_trail table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trade_audit_trail (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp DATETIME NOT NULL,
+                log_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES paper_trade_sessions (id) ON DELETE CASCADE
+            )
+        """)
+        
+        # Create index for faster queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_timestamp ON paper_trade_audit_trail(session_id, timestamp)")
+        
+        conn.commit()
+        conn.close()
+        logging.info("Paper trade tables initialized successfully")
+    except Exception as e:
+        logging.error(f"Error initializing paper trade tables: {e}", exc_info=True)
+
+# Initialize tables on startup
+init_paper_trade_tables()
 
 def send_email(to_email, otp):
     port = 465  # For SSL
@@ -2056,6 +2112,337 @@ def api_market_snapshot():
     except Exception as e:
         logging.error(f"Error fetching market snapshot: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': 'Failed to fetch snapshot'}), 500
+
+@app.route("/api/paper_trade/start", methods=['POST'])
+def api_paper_trade_start():
+    """Start paper trading for a strategy"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha not connected'}), 401
+
+    try:
+        data = request.get_json()
+        strategy_id = data.get('strategy_id')
+        
+        if not strategy_id:
+            return jsonify({'status': 'error', 'message': 'Strategy ID is required'}), 400
+
+        conn = get_db_connection()
+        strategy_data = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id'])).fetchone()
+        conn.close()
+
+        if not strategy_data:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+
+        # Check if already running
+        if strategy_id in paper_trade_strategies:
+            return jsonify({'status': 'error', 'message': 'Paper trading already running for this strategy'}), 400
+
+        # Validate strategy type
+        strategy_type = strategy_data['strategy_type']
+        if strategy_type != 'capture_mountain_signal':
+            return jsonify({'status': 'error', 'message': 'Only Mountain Signal strategy is supported for paper trading'}), 400
+
+        # Set access token
+        kite.set_access_token(session['access_token'])
+
+        # Determine expiry type based on instrument
+        instrument = strategy_data['instrument']
+        if instrument == 'BANKNIFTY':
+            expiry_type = 'monthly'  # Monthly for BANKNIFTY
+        elif instrument == 'NIFTY':
+            expiry_type = 'weekly'  # Weekly for NIFTY
+        else:
+            # Try to get expiry_type from strategy_data, default to 'weekly'
+            try:
+                expiry_type = strategy_data['expiry_type']
+            except (KeyError, IndexError):
+                expiry_type = 'weekly'
+
+        # Get ema_period with fallback
+        try:
+            ema_period = strategy_data['ema_period']
+        except (KeyError, IndexError):
+            ema_period = 5  # Default to 5 if not present
+        
+        # Create paper trade session in database first (to get session_id)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO paper_trade_sessions 
+            (user_id, strategy_id, strategy_name, instrument, expiry_type, candle_time, ema_period, started_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')
+        """, (
+            session['user_id'],
+            strategy_id,
+            strategy_data['strategy_name'],
+            instrument,
+            expiry_type,
+            strategy_data['candle_time'],
+            ema_period,
+            datetime.datetime.now()
+        ))
+        session_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        # Instantiate strategy with paper_trade=True and session_id
+        strategy = CaptureMountainSignal(
+            kite,
+            instrument,
+            strategy_data['candle_time'],
+            strategy_data['start_time'],
+            strategy_data['end_time'],
+            strategy_data['stop_loss'],
+            strategy_data['target_profit'],
+            strategy_data['total_lot'],
+            strategy_data['trailing_stop_loss'],
+            strategy_data['segment'],
+            strategy_data['trade_type'],
+            strategy_data['strike_price'],
+            expiry_type,  # Use determined expiry type
+            f"{strategy_data['strategy_name']}_PaperTrade",
+            paper_trade=True,
+            ema_period=ema_period,
+            session_id=session_id  # Pass session_id to strategy
+        )
+        
+        strategy.run()
+        
+        # Store in paper_trade_strategies with session_id
+        paper_trade_strategies[strategy_id] = {
+            'strategy': strategy,
+            'strategy_id': strategy_id,
+            'user_id': session['user_id'],
+            'session_id': session_id,
+            'started_at': datetime.datetime.now(),
+            'status': 'running'
+        }
+
+        # Add to running_strategies so ticker processes it
+        unique_run_id = str(uuid.uuid4())
+        running_strategies[unique_run_id] = {
+            'strategy': strategy,
+            'db_id': strategy_id,
+            'name': strategy_data['strategy_name'],
+            'instrument': instrument,
+            'status': 'running',
+            'paper_trade': True
+        }
+
+        # Emit initial status
+        socketio.emit('paper_trade_update', {
+            'status': 'Strategy started - Monitoring index for signals',
+            'auditLog': {
+                'id': 1,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'type': 'info',
+                'message': f'Paper Trading Started - {strategy_data["strategy_name"]}',
+                'details': {
+                    'instrument': instrument,
+                    'expiry_type': expiry_type,
+                    'candle_time': strategy_data['candle_time'],
+                    'ema_period': ema_period
+                }
+            }
+        }, room=f'paper_trade_{strategy_id}')
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Paper trading started successfully',
+            'strategy_id': strategy_id
+        })
+
+    except Exception as e:
+        logging.error(f"Error starting paper trade: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error starting paper trading: {str(e)}'}), 500
+
+@app.route("/api/paper_trade/stop", methods=['POST'])
+def api_paper_trade_stop():
+    """Stop paper trading"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        # Find and stop all paper trade strategies for this user
+        strategies_to_stop = []
+        for strategy_id, pt_info in list(paper_trade_strategies.items()):
+            if pt_info['user_id'] == session['user_id']:
+                strategies_to_stop.append(strategy_id)
+
+        # Remove from running_strategies
+        for unique_run_id, running_strat_info in list(running_strategies.items()):
+            if running_strat_info.get('paper_trade') and running_strat_info['db_id'] in strategies_to_stop:
+                del running_strategies[unique_run_id]
+
+        # Remove from paper_trade_strategies and update DB
+        conn = get_db_connection()
+        for strategy_id in strategies_to_stop:
+            if strategy_id in paper_trade_strategies:
+                pt_info = paper_trade_strategies[strategy_id]
+                session_id = pt_info.get('session_id')
+                
+                # Update session in database
+                if session_id:
+                    try:
+                        cursor = conn.cursor()
+                        # Calculate total trades and P&L from strategy status
+                        strategy_status = pt_info['strategy'].status if hasattr(pt_info['strategy'], 'status') else {}
+                        total_trades = strategy_status.get('total_trades', 0)
+                        total_pnl = strategy_status.get('realized_pnl', 0) or strategy_status.get('pnl', 0)
+                        
+                        cursor.execute("""
+                            UPDATE paper_trade_sessions 
+                            SET stopped_at = ?, status = 'stopped', total_trades = ?, total_pnl = ?
+                            WHERE id = ?
+                        """, (datetime.datetime.now(), total_trades, total_pnl, session_id))
+                        conn.commit()
+                    except Exception as e:
+                        logging.error(f"Error updating paper trade session: {e}", exc_info=True)
+                        conn.rollback()
+                
+                # Emit stop event
+                socketio.emit('paper_trade_update', {
+                    'status': 'Stopped',
+                    'auditLog': {
+                        'id': 999,
+                        'timestamp': datetime.datetime.now().isoformat(),
+                        'type': 'info',
+                        'message': 'Paper Trading Stopped',
+                        'details': {}
+                    }
+                }, room=f'paper_trade_{strategy_id}')
+                del paper_trade_strategies[strategy_id]
+        conn.close()
+
+        return jsonify({
+            'status': 'success',
+            'message': f'Stopped {len(strategies_to_stop)} paper trade strategy(ies)'
+        })
+
+    except Exception as e:
+        logging.error(f"Error stopping paper trade: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error stopping paper trading: {str(e)}'}), 500
+
+@socketio.on('join_paper_trade')
+def on_join_paper_trade(data):
+    """Join paper trade room for real-time updates"""
+    if 'user_id' not in session:
+        emit('error', {'message': 'Not authenticated'})
+        return
+    
+    strategy_id = data.get('strategy_id')
+    if strategy_id:
+        room_name = f'paper_trade_{strategy_id}'
+        from flask_socketio import join_room
+        join_room(room_name)
+        emit('info', {'message': f'Joined paper trade room for strategy {strategy_id}'})
+
+@app.route("/api/paper_trade/sessions", methods=['GET'])
+def api_paper_trade_sessions():
+    """Get all paper trade sessions for the current user"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        date_filter = request.args.get('date')  # Optional date filter (YYYY-MM-DD)
+        
+        conn = get_db_connection()
+        if date_filter:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, strategy_id, strategy_name, instrument, expiry_type, 
+                       candle_time, ema_period, started_at, stopped_at, status, 
+                       total_trades, total_pnl
+                FROM paper_trade_sessions
+                WHERE user_id = ? AND DATE(started_at) = ?
+                ORDER BY started_at DESC
+            """, (session['user_id'], date_filter))
+        else:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, strategy_id, strategy_name, instrument, expiry_type, 
+                       candle_time, ema_period, started_at, stopped_at, status, 
+                       total_trades, total_pnl
+                FROM paper_trade_sessions
+                WHERE user_id = ?
+                ORDER BY started_at DESC
+                LIMIT 100
+            """, (session['user_id'],))
+        
+        sessions = []
+        for row in cursor.fetchall():
+            sessions.append({
+                'id': row['id'],
+                'strategy_id': row['strategy_id'],
+                'strategy_name': row['strategy_name'],
+                'instrument': row['instrument'],
+                'expiry_type': row['expiry_type'],
+                'candle_time': row['candle_time'],
+                'ema_period': row['ema_period'],
+                'started_at': row['started_at'],
+                'stopped_at': row['stopped_at'],
+                'status': row['status'],
+                'total_trades': row['total_trades'],
+                'total_pnl': row['total_pnl']
+            })
+        
+        conn.close()
+        return jsonify({'status': 'success', 'sessions': sessions})
+    except Exception as e:
+        logging.error(f"Error fetching paper trade sessions: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error fetching sessions: {str(e)}'}), 500
+
+@app.route("/api/paper_trade/audit_trail/<int:session_id>", methods=['GET'])
+def api_paper_trade_audit_trail(session_id):
+    """Get audit trail for a specific paper trade session"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Verify session belongs to user
+        cursor.execute("""
+            SELECT user_id FROM paper_trade_sessions WHERE id = ?
+        """, (session_id,))
+        session_row = cursor.fetchone()
+        
+        if not session_row:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Session not found'}), 404
+        
+        if session_row['user_id'] != session['user_id']:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+        
+        # Fetch audit trail
+        cursor.execute("""
+            SELECT id, timestamp, log_type, message, details
+            FROM paper_trade_audit_trail
+            WHERE session_id = ?
+            ORDER BY timestamp ASC
+        """, (session_id,))
+        
+        import json
+        audit_logs = []
+        for row in cursor.fetchall():
+            audit_logs.append({
+                'id': row['id'],
+                'timestamp': row['timestamp'],
+                'type': row['log_type'],
+                'message': row['message'],
+                'details': json.loads(row['details']) if row['details'] else {}
+            })
+        
+        conn.close()
+        return jsonify({'status': 'success', 'audit_logs': audit_logs})
+    except Exception as e:
+        logging.error(f"Error fetching audit trail: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error fetching audit trail: {str(e)}'}), 500
 
 @app.route("/api/market_replay", methods=['POST'])
 def api_market_replay():

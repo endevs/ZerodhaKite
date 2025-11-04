@@ -4,6 +4,7 @@ import Navigation from './Navigation';
 import { io, Socket } from 'socket.io-client';
 import DashboardContent from './DashboardContent';
 import AlgoVisualizationContent from './AlgoVisualizationContent';
+import PaperTradeContent from './PaperTradeContent';
 import BacktestContent from './BacktestContent';
 import MarketReplayContent from './MarketReplayContent';
 import TickDataContent from './TickDataContent';
@@ -271,6 +272,8 @@ const Dashboard: React.FC = () => {
         );
       case 'algo-visualization':
         return <AlgoVisualizationContent />;
+      case 'paper-trade':
+        return <PaperTradeContent />;
       case 'backtest':
         return <BacktestContent />;
       case 'market-replay':

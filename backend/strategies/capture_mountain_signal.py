@@ -27,11 +27,12 @@ class CaptureMountainSignal(BaseStrategy):
     - **Stop Loss:** Price closes below signal candle's LOW
     - **Target:** Wait for at least 1 candle where LOW > 5 EMA, then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade
     """
-    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input, paper_trade=False, ema_period=5):
+    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input, paper_trade=False, ema_period=5, session_id=None):
         super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input)
         self.strategy_name_input = strategy_name_input
         self.paper_trade = paper_trade
         self.ema_period = ema_period
+        self.paper_trade_session_id = session_id  # Store session_id for DB logging
         self.instrument_token = self._get_instrument_token()
         self.historical_data = [] # Stores 5-minute candles
         self.pe_signal_candle = None
@@ -261,6 +262,29 @@ class CaptureMountainSignal(BaseStrategy):
             # Keep only last 1000 audit entries
             if len(self.status['audit_trail']) > 1000:
                 self.status['audit_trail'] = self.status['audit_trail'][-1000:]
+            
+            # Save to database if paper trading
+            if self.paper_trade and self.paper_trade_session_id:
+                try:
+                    from database import get_db_connection
+                    import json
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO paper_trade_audit_trail 
+                        (session_id, timestamp, log_type, message, details)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        self.paper_trade_session_id,
+                        datetime.datetime.now(),
+                        event_type,
+                        message,
+                        json.dumps(data) if data else None
+                    ))
+                    conn.commit()
+                    conn.close()
+                except Exception as db_error:
+                    logging.error(f"Error saving audit trail to database: {db_error}", exc_info=True)
             
             logging.info(f"[AUDIT] {event_type}: {message}")
         except Exception as e:

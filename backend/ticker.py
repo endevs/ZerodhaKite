@@ -231,6 +231,93 @@ class Ticker:
                             'status': 'active'
                         }
                     }, room=room_name)
+                    
+                    # Emit paper trade specific updates if this is a paper trade strategy
+                    if strategy_info.get('paper_trade'):
+                        try:
+                            # Prepare audit log for paper trade
+                            latest_audit = strategy_status.get('audit_trail', [])
+                            audit_log = None
+                            if latest_audit:
+                                latest_entry = latest_audit[-1]
+                                audit_log = {
+                                    'id': len(latest_audit),
+                                    'timestamp': latest_entry.get('timestamp', datetime.datetime.now().isoformat()),
+                                    'type': latest_entry.get('type', 'info'),
+                                    'message': latest_entry.get('message', ''),
+                                    'details': latest_entry.get('data', {})
+                                }
+                            
+                            # Prepare chart data (today's candles only)
+                            today = datetime.datetime.now().date()
+                            today_candles = []
+                            today_ema = []
+                            today_rsi = []
+                            
+                            for candle in historical_candles[-100:]:  # Last 100 candles
+                                try:
+                                    candle_time = datetime.datetime.fromisoformat(candle['time']) if isinstance(candle['time'], str) else candle['time']
+                                    if isinstance(candle_time, datetime.datetime) and candle_time.date() == today:
+                                        today_candles.append({
+                                            'x': candle['time'],
+                                            'o': candle['open'],
+                                            'h': candle['high'],
+                                            'l': candle['low'],
+                                            'c': candle['close']
+                                        })
+                                        if 'ema5' in candle:
+                                            today_ema.append({'x': candle['time'], 'y': candle['ema5']})
+                                        # RSI calculation would need to be added if not already in strategy
+                                except Exception as e:
+                                    logging.debug(f"Error processing candle for paper trade: {e}")
+                                    continue
+                            
+                            # Prepare trade event if a trade was just placed or closed
+                            trade_event = None
+                            if strategy_status.get('trade_placed') and not strategy_status.get('last_trade_event_emitted'):
+                                # New trade entry
+                                trade_event = {
+                                    'signalTime': strategy_status.get('signal_candle_time', ''),
+                                    'signalType': 'PE' if strategy_status.get('position') == -1 else 'CE',
+                                    'signalHigh': strategy_status.get('signal_candle_high', 0),
+                                    'signalLow': strategy_status.get('signal_candle_low', 0),
+                                    'entryTime': datetime.datetime.now().isoformat(),
+                                    'entryPrice': strategy_status.get('entry_price', 0),
+                                    'optionSymbol': strategy_status.get('traded_instrument', ''),
+                                    'optionPrice': strategy_status.get('option_prices', {}).get('atm_pe' if strategy_status.get('position') == -1 else 'atm_ce', 0),
+                                    'exitTime': None,
+                                    'exitPrice': None,
+                                    'exitType': None,
+                                    'pnl': None,
+                                    'pnlPercent': None
+                                }
+                                strategy_status['last_trade_event_emitted'] = True
+                            elif not strategy_status.get('trade_placed') and strategy_status.get('last_trade_event_emitted'):
+                                # Trade was closed
+                                trade_event = {
+                                    'exitTime': datetime.datetime.now().isoformat(),
+                                    'exitPrice': strategy_status.get('exit_price', 0),
+                                    'exitType': strategy_status.get('exit_type', ''),
+                                    'pnl': strategy_status.get('pnl', 0),
+                                    'pnlPercent': strategy_status.get('pnl_percent', 0)
+                                }
+                                strategy_status['last_trade_event_emitted'] = False
+                            
+                            # Emit paper trade update (only if there's new data)
+                            if audit_log or len(today_candles) > 0 or trade_event:
+                                self.socketio.emit('paper_trade_update', {
+                                    'status': strategy_status.get('message', 'Running'),
+                                    'auditLog': audit_log,
+                                    'chartData': {
+                                        'candles': today_candles,
+                                        'ema5': today_ema,
+                                        'rsi14': today_rsi
+                                    },
+                                    'tradeEvent': trade_event
+                                }, room=f'paper_trade_{db_id}')
+                        except Exception as e:
+                            logging.error(f"Error emitting paper trade update for strategy {db_id}: {e}", exc_info=True)
+                    
                 except Exception as e:
                     logging.error(f"Error emitting strategy update for strategy {db_id}: {e}", exc_info=True)
         
