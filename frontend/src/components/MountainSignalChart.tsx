@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Customized, XAxisProps, YAxisProps } from 'recharts';
 
 interface Strategy {
@@ -64,6 +64,59 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [chartData, setChartData] = useState<ChartDataResponse>({ candles: [], ema5: [] });
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const [containerDimensions, setContainerDimensions] = useState<{ width: number; height: number } | null>(null);
+  
+  // Use callback ref to attach container to ref
+  const containerRefCallback = useCallback((node: HTMLDivElement | null) => {
+    chartContainerRef.current = node;
+  }, []);
+  
+  // Use ResizeObserver to detect when container has dimensions
+  useEffect(() => {
+    if (!chartContainerRef.current || chartData.candles.length === 0) {
+      setContainerDimensions(null);
+      return;
+    }
+    
+    const node = chartContainerRef.current;
+    let resizeObserver: ResizeObserver | null = null;
+    
+    // Use ResizeObserver to detect when container has dimensions
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setContainerDimensions({ width, height });
+        }
+      }
+    });
+    
+    resizeObserver.observe(node);
+    
+    // Also check immediately in case ResizeObserver doesn't fire
+    const checkDimensions = () => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setContainerDimensions({ width: rect.width, height: rect.height });
+      } else {
+        // Retry after a short delay
+        setTimeout(checkDimensions, 50);
+      }
+    };
+    
+    // Use requestAnimationFrame to ensure DOM is fully laid out
+    requestAnimationFrame(() => {
+      checkDimensions();
+    });
+    
+    // Cleanup
+    return () => {
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
+  }, [chartData.candles.length]); // Re-run when chart data changes
   const [signalCandles, setSignalCandles] = useState<SignalCandle[]>([]);
   const [tradeEvents, setTradeEvents] = useState<TradeEvent[]>([]);
   const [peBreakLevel, setPeBreakLevel] = useState<number | null>(null);
@@ -136,14 +189,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     setSelectedDate(today);
   }, []);
 
-  // Fetch chart data when date changes
-  useEffect(() => {
-    if (selectedDate) {
-      fetchChartData();
-    }
-  }, [selectedDate, strategy]);
-
-  const fetchChartData = async () => {
+  const fetchChartData = useCallback(async () => {
     if (!selectedDate) {
       setError('Please select a date');
       return;
@@ -177,7 +223,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedDate, strategy.instrument, candleTime]);
+
+  // Fetch chart data when date or strategy changes
+  useEffect(() => {
+    if (selectedDate) {
+      fetchChartData();
+    }
+  }, [selectedDate, fetchChartData]);
 
   const processMountainSignalLogic = (data: ChartDataResponse) => {
     const candles = data.candles;
@@ -526,6 +579,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       }
     }
 
+    // Update all state at once (React automatically batches these)
     setSignalCandles(signals);
     setTradeEvents(trades);
     setIgnoredSignals(ignored);
@@ -633,6 +687,21 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       };
     });
   }, [chartData, signalCandles, tradeEvents]);
+
+  // Handle window resize - update dimensions
+  useEffect(() => {
+    const handleResize = () => {
+      if (chartContainerRef.current) {
+        const rect = chartContainerRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          setContainerDimensions({ width: rect.width, height: rect.height });
+        }
+      }
+    };
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Enhanced Custom Tooltip with full details
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -1393,8 +1462,12 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               <i className="bi bi-bar-chart-fill me-2"></i>
               Mountain Signal Strategy Chart
             </h5>
-            <div style={{ width: '100%', height: '600px', minWidth: 0 }}>
-              <ResponsiveContainer width="100%" height="100%">
+            <div 
+              ref={containerRefCallback}
+              style={{ width: '100%', height: '600px', minWidth: '100%', minHeight: '600px', position: 'relative', display: 'block' }}
+            >
+              {containerDimensions && chartDataFormatted.length > 0 ? (
+                <ResponsiveContainer width={containerDimensions.width} height={containerDimensions.height}>
                 <ComposedChart
                   data={chartDataFormatted}
                   margin={{ top: 20, right: 30, left: 20, bottom: 60 }}
@@ -1547,7 +1620,12 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     </>
                   )}
                 </ComposedChart>
-              </ResponsiveContainer>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                  <div className="text-muted">Loading chart...</div>
+                </div>
+              )}
             </div>
           </div>
         </div>

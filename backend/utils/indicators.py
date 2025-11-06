@@ -245,3 +245,4 @@ def identify_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     
     return patterns
 
+

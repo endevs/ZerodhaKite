@@ -16,6 +16,7 @@ const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, userNam
     { id: 'market-replay', label: 'Market Replay', icon: '📈' },
     { id: 'tick-data', label: 'Tick Data', icon: '📉' },
     { id: 'chat', label: 'Chat', icon: '💬' },
+    { id: 'ai-ml', label: 'AI / ML', icon: '🤖' },
   ];
 
   return (

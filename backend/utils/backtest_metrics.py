@@ -215,3 +215,4 @@ def calculate_all_metrics(trades: List[Dict], initial_capital: float = 100000,
         'equity_curve': equity_curve.to_dict()
     }
 
+

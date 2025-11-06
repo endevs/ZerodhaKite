@@ -126,3 +126,4 @@ macd, signal, hist = calculate_macd(df['close'])
 - [ ] Strategy deployment UI enhancements
 - [ ] Documentation and tutorials
 
+

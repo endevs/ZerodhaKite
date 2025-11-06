@@ -11,6 +11,7 @@ import TickDataContent from './TickDataContent';
 import ChartContent from './ChartContent';
 import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
+import AIMLContent from './AIMLContent';
 
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -25,6 +26,7 @@ const Dashboard: React.FC = () => {
   const [showLiveStrategyModal, setShowLiveStrategyModal] = useState<boolean>(false);
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const warningShownRef = useRef<boolean>(false);
 
   const handleViewChart = useCallback((instrumentToken: string) => {
     setChartInstrumentToken(instrumentToken);
@@ -227,9 +229,12 @@ const Dashboard: React.FC = () => {
       }
     });
 
-    // Set timeout to show warning if no data received after 10 seconds
+    // Set timeout to show warning if no data received after 10 seconds (only once)
     const timeoutId = setTimeout(() => {
-      console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
+      if (!warningShownRef.current && (niftyPrice === 'Loading...' || bankNiftyPrice === 'Loading...')) {
+        console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
+        warningShownRef.current = true;
+      }
     }, 10000);
 
     return () => {
@@ -282,6 +287,8 @@ const Dashboard: React.FC = () => {
         return <TickDataContent onViewChart={handleViewChart} />;
       case 'chat':
         return <ChartContent />;
+      case 'ai-ml':
+        return <AIMLContent />;
       default:
         return (
           <DashboardContent
