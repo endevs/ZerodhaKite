@@ -4,9 +4,6 @@ import Navigation from './Navigation';
 import { io, Socket } from 'socket.io-client';
 import DashboardContent from './DashboardContent';
 import AlgoVisualizationContent from './AlgoVisualizationContent';
-import PaperTradeContent from './PaperTradeContent';
-import MarketReplayContent from './MarketReplayContent';
-import ChartContent from './ChartContent';
 import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
@@ -265,12 +262,6 @@ const Dashboard: React.FC = () => {
         );
       case 'algo-visualization':
         return <AlgoVisualizationContent />;
-      case 'paper-trade':
-        return <PaperTradeContent />;
-      case 'market-replay':
-        return <MarketReplayContent />;
-      case 'chat':
-        return <ChartContent />;
       case 'ai-ml':
         return <AIMLContent />;
       default:

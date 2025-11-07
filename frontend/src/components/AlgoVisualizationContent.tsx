@@ -132,7 +132,7 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                     type="button"
                   >
                     <i className="bi bi-graph-up me-2"></i>
-                    Candlestick Chart with Indicators
+                    Paper Trade
                   </button>
                 </li>
                 <li className="nav-item" role="presentation">
@@ -190,12 +190,12 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                         <div className="card-body">
                           <h5 className="card-title mb-3">
                             <i className="bi bi-graph-up me-2 text-primary"></i>
-                            Candlestick Chart with Indicators
+                            Paper Trade
                           </h5>
                           <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
                             <div className="text-center text-muted">
                               <i className="bi bi-graph-up" style={{ fontSize: '4rem', opacity: 0.3 }}></i>
-                              <p className="mt-3">Candlestick chart for {selectedStrategy.strategy_type} will be implemented soon</p>
+                              <p className="mt-3">Paper Trade view for {selectedStrategy.strategy_type} will be implemented soon</p>
                               <p className="small">
                                 Strategy: <strong>{selectedStrategy.strategy_name}</strong> |{' '}
                                 Instrument: <strong>{selectedStrategy.instrument}</strong>
