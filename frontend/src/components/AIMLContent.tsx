@@ -1,0 +1,760 @@
+import React, { useState } from 'react';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea } from 'recharts';
+
+interface AIMLContentProps {}
+
+const AIMLContent: React.FC<AIMLContentProps> = () => {
+  const [activeTab, setActiveTab] = useState<string>('overview');
+
+  const tabs = [
+    { id: 'overview', label: 'Overview', icon: '📊' },
+    { id: 'predictions', label: 'Price Predictions', icon: '🔮' },
+    { id: 'reinforcement-learning', label: 'Reinforcement Learning', icon: '🤖' },
+    { id: 'sentiment', label: 'Train Model', icon: '💭' },
+    { id: 'pattern-recognition', label: 'Pattern Recognition', icon: '🔍' },
+    { id: 'strategy-optimization', label: 'Strategy Optimization', icon: '⚙️' },
+  ];
+
+  return (
+    <div className="container-fluid">
+      <div className="card shadow-sm border-0 mb-4">
+        <div className="card-header bg-gradient text-white" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+          <h4 className="card-title mb-0">
+            <i className="bi bi-robot me-2"></i>
+            AI / ML Trading Analytics
+          </h4>
+          <small className="text-white-50">Advanced AI-powered tools for trading insights and predictions</small>
+        </div>
+        <div className="card-body">
+          {/* Tab Navigation */}
+          <ul className="nav nav-tabs mb-4" role="tablist">
+            {tabs.map((tab) => (
+              <li key={tab.id} className="nav-item" role="presentation">
+                <button
+                  className={`nav-link ${activeTab === tab.id ? 'active' : ''}`}
+                  onClick={() => setActiveTab(tab.id)}
+                  type="button"
+                >
+                  <span className="me-2">{tab.icon}</span>
+                  {tab.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          {/* Tab Content */}
+          <div className="tab-content">
+            {/* Overview Tab */}
+            {activeTab === 'overview' && (
+              <div className="row">
+                <div className="col-12">
+                  <div className="card border-0 shadow-sm mb-4">
+                    <div className="card-header bg-primary text-white">
+                      <h6 className="mb-0">
+                        <i className="bi bi-info-circle me-2"></i>
+                        AI / ML Features Overview
+                      </h6>
+                    </div>
+                    <div className="card-body">
+                      <div className="row">
+                        <div className="col-md-6 mb-4">
+                          <div className="card h-100 border">
+                            <div className="card-body">
+                              <h5 className="card-title">
+                                <i className="bi bi-graph-up-arrow text-primary me-2"></i>
+                                Price Predictions
+                              </h5>
+                              <p className="card-text">
+                                Machine learning models to predict future price movements based on historical data,
+                                technical indicators, and market patterns.
+                              </p>
+                              <ul className="list-unstyled">
+                                <li><i className="bi bi-check-circle text-success me-2"></i>LSTM Neural Networks</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Random Forest Models</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Support Vector Machines</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-4">
+                          <div className="card h-100 border">
+                            <div className="card-body">
+                              <h5 className="card-title">
+                                <i className="bi bi-chat-dots text-info me-2"></i>
+                                Sentiment Analysis
+                              </h5>
+                              <p className="card-text">
+                                Analyze market sentiment from news, social media, and other sources to gauge
+                                market mood and potential price movements.
+                              </p>
+                              <ul className="list-unstyled">
+                                <li><i className="bi bi-check-circle text-success me-2"></i>News Sentiment Scoring</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Social Media Analysis</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Real-time Sentiment Tracking</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-4">
+                          <div className="card h-100 border">
+                            <div className="card-body">
+                              <h5 className="card-title">
+                                <i className="bi bi-search text-warning me-2"></i>
+                                Pattern Recognition
+                              </h5>
+                              <p className="card-text">
+                                AI-powered pattern detection to identify chart patterns, candlestick formations,
+                                and trading opportunities automatically.
+                              </p>
+                              <ul className="list-unstyled">
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Candlestick Pattern Detection</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Chart Pattern Recognition</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Anomaly Detection</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-4">
+                          <div className="card h-100 border">
+                            <div className="card-body">
+                              <h5 className="card-title">
+                                <i className="bi bi-gear text-success me-2"></i>
+                                Strategy Optimization
+                              </h5>
+                              <p className="card-text">
+                                Use genetic algorithms and reinforcement learning to optimize trading strategy
+                                parameters for better performance.
+                              </p>
+                              <ul className="list-unstyled">
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Parameter Optimization</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Genetic Algorithms</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Reinforcement Learning</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-4">
+                          <div className="card h-100 border">
+                            <div className="card-body">
+                              <h5 className="card-title">
+                                <i className="bi bi-lightning-charge text-warning me-2"></i>
+                                Real-time Analytics
+                              </h5>
+                              <p className="card-text">
+                                Continuous learning models that adapt to market conditions in real-time,
+                                providing up-to-date insights and predictions.
+                              </p>
+                              <ul className="list-unstyled">
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Online Learning</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Adaptive Models</li>
+                                <li><i className="bi bi-check-circle text-success me-2"></i>Real-time Updates</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Price Predictions Tab */}
+            {activeTab === 'predictions' && (
+              <AIMLPredictions />
+            )}
+
+            {/* Train Model Tab */}
+            {activeTab === 'sentiment' && (
+              <TrainModelPanel />
+            )}
+
+            {/* Pattern Recognition Tab */}
+            {activeTab === 'pattern-recognition' && (
+              <div className="card border-0 shadow-sm">
+                <div className="card-header bg-info text-white">
+                  <h6 className="mb-0">
+                    <i className="bi bi-search me-2"></i>
+                    Pattern Recognition
+                  </h6>
+                </div>
+                <div className="card-body">
+                  <div className="alert alert-info" role="alert">
+                    <i className="bi bi-info-circle me-2"></i>
+                    <strong>Coming Soon:</strong> AI-powered pattern recognition will automatically detect chart patterns,
+                    candlestick formations, and trading opportunities.
+                  </div>
+                  <div className="text-center py-5">
+                    <i className="bi bi-search" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
+                    <p className="mt-3 text-muted">Pattern recognition features will be implemented here</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Strategy Optimization Tab */}
+            {activeTab === 'strategy-optimization' && (
+              <div className="card border-0 shadow-sm">
+                <div className="card-header bg-info text-white">
+                  <h6 className="mb-0">
+                    <i className="bi bi-gear me-2"></i>
+                    Strategy Optimization
+                  </h6>
+                </div>
+                <div className="card-body">
+                  <div className="alert alert-info" role="alert">
+                    <i className="bi bi-info-circle me-2"></i>
+                    <strong>Coming Soon:</strong> Use AI to optimize trading strategy parameters using genetic algorithms
+                    and reinforcement learning for better performance.
+                  </div>
+                  <div className="text-center py-5">
+                    <i className="bi bi-gear" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
+                    <p className="mt-3 text-muted">Strategy optimization features will be implemented here</p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default AIMLContent;
+
+
+
+// Inline component for Phase-1 predictions UI
+const AIMLPredictions: React.FC = () => {
+  const [symbol, setSymbol] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [years, setYears] = useState<number>(2);
+  const [horizon, setHorizon] = useState<number>(1);
+  const [lookback, setLookback] = useState<number>(60);
+  const [epochs, setEpochs] = useState<number>(15);
+  const [steps, setSteps] = useState<number>(3);
+
+  const [loading, setLoading] = useState<boolean>(false);
+  const [trainingInfo, setTrainingInfo] = useState<any>(null);
+  const [prediction, setPrediction] = useState<{ predictions: number[]; confidence: number } | null>(null);
+  const [overlaySeries, setOverlaySeries] = useState<Array<{ time: string; actual: number; predicted: number; subset: 'train'|'test' }>>([]);
+  const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [dateSeries, setDateSeries] = useState<Array<{ time: string; actual: number; predicted: number }>>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const trainModel = async () => {
+    setError(null);
+    setLoading(true);
+    setTrainingInfo(null);
+    try {
+      const res = await fetch('/api/aiml/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, years, horizon, lookback, epochs }),
+      });
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Training failed');
+      setTrainingInfo(data);
+    } catch (e: any) {
+      setError(e.message || 'Training error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runPrediction = async () => {
+    setError(null);
+    setLoading(true);
+    setPrediction(null);
+    try {
+      const params = new URLSearchParams({ symbol, horizon: String(horizon), steps: String(steps), lookback: String(lookback) });
+      const res = await fetch(`/api/aiml/predict?${params.toString()}`);
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Prediction failed');
+      setPrediction({ predictions: data.predictions || [], confidence: data.confidence || 0 });
+    } catch (e: any) {
+      setError(e.message || 'Prediction error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchOverlay = async () => {
+    setError(null);
+    setLoading(true);
+    setOverlaySeries([]);
+    setDateSeries([]);
+    try {
+      const params = new URLSearchParams({ symbol, years: String(3), horizon: String(horizon), lookback: String(lookback) });
+      const res = await fetch(`/api/aiml/evaluate?${params.toString()}`);
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Evaluation failed');
+      setOverlaySeries(data.series || []);
+    } catch (e: any) {
+      setError(e.message || 'Overlay fetch error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchDateData = async () => {
+    setError(null);
+    setLoading(true);
+    setDateSeries([]);
+    setOverlaySeries([]);
+    try {
+      const params = new URLSearchParams({
+        symbol,
+        date: selectedDate,
+        horizon: String(horizon),
+        lookback: String(lookback)
+      });
+      const res = await fetch(`/api/aiml/evaluate_date?${params.toString()}`);
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Date evaluation failed');
+      setDateSeries(data.series || []);
+    } catch (e: any) {
+      setError(e.message || 'Date evaluation error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="card border-0 shadow-sm">
+      <div className="card-header bg-info text-white">
+        <h6 className="mb-0">
+          <i className="bi bi-graph-up-arrow me-2"></i>
+          LSTM Price Predictions (Phase 1)
+        </h6>
+      </div>
+      <div className="card-body">
+        <div className="mt-3 d-flex gap-2 align-items-end">
+          <div className="d-flex gap-2 align-items-end">
+            <div>
+              <label className="form-label small mb-1">Select Date</label>
+              <input
+                type="date"
+                className="form-control form-control-sm"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                max={new Date().toISOString().split('T')[0]}
+                disabled={loading}
+              />
+            </div>
+            <button className="btn btn-outline-info" onClick={fetchDateData} disabled={loading || !selectedDate}>
+              {loading ? 'Loading...' : 'Show Date Chart'}
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="alert alert-danger mt-3" role="alert">
+            <i className="bi bi-exclamation-triangle me-2"></i>
+            {error}
+          </div>
+        )}
+
+        {dateSeries.length > 0 && (
+          <div className="mt-3">
+            <h6>Actual vs Predicted for {selectedDate}</h6>
+            <DateChart data={dateSeries} date={selectedDate} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const OverlayChart: React.FC<{ data: Array<{ time: string; actual: number; predicted: number; subset: 'train'|'test' }> }> = ({ data }) => {
+  const splitIndex = data.findIndex(d => d.subset === 'test');
+  const chartData = data.map(d => ({ time: d.time, actual: d.actual, predicted: d.predicted, subset: d.subset }));
+  // Determine x-range for test shading
+  const testStart = splitIndex >= 0 ? chartData[splitIndex]?.time : undefined;
+  const testEnd = chartData[chartData.length - 1]?.time;
+  return (
+    <div className="card">
+      <div className="card-body">
+        <ResponsiveContainer width="100%" height={420}>
+          <LineChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
+            <XAxis dataKey="time" hide={true} />
+            <YAxis domain={["dataMin", "dataMax"]} allowDecimals={false} />
+            <Tooltip />
+            <Legend />
+            {/* Shade test region */}
+            {testStart && testEnd && (
+              <ReferenceArea x1={testStart} x2={testEnd} strokeOpacity={0.1} fill="#ffecb3" fillOpacity={0.3} />
+            )}
+            <Line type="monotone" dataKey="actual" stroke="#1976D2" dot={false} name="Actual" />
+            <Line type="monotone" dataKey="predicted" stroke="#E91E63" dot={false} name="Predicted" />
+          </LineChart>
+        </ResponsiveContainer>
+        <div className="mt-2">
+          <span className="badge bg-primary me-2">Actual</span>
+          <span className="badge bg-danger me-2">Predicted</span>
+          <span className="badge bg-warning text-dark">Shaded: Test (30%)</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const DateChart: React.FC<{ data: Array<{ time: string; actual: number; predicted: number; timeFull?: string }>; date: string }> = ({ data, date }) => {
+  // Use time directly from backend (already formatted as HH:MM in IST)
+  const chartData = data.map(d => {
+    // Backend sends 'time' as HH:MM string, use it directly
+    const timeStr = d.time.includes(':') && d.time.length <= 5 ? d.time :
+      (d.timeFull ? new Date(d.timeFull).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : d.time);
+    return {
+      time: timeStr,
+      timeFull: d.timeFull || d.time,
+      actual: d.actual,
+      predicted: d.predicted
+    };
+  });
+
+  return (
+    <div className="card">
+      <div className="card-body">
+        <ResponsiveContainer width="100%" height={420}>
+          <LineChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 60 }}>
+            <XAxis
+              dataKey="time"
+              angle={-45}
+              textAnchor="end"
+              height={80}
+              interval="preserveStartEnd"
+            />
+            <YAxis domain={["dataMin", "dataMax"]} allowDecimals={false} />
+            <Tooltip
+              formatter={(value: any, name: string) => [`₹${Number(value).toFixed(2)}`, name]}
+              labelFormatter={(label) => `${date} ${label}`}
+            />
+            <Legend />
+            <Line type="monotone" dataKey="actual" stroke="#1976D2" dot={false} strokeWidth={2} name="Actual" />
+            <Line type="monotone" dataKey="predicted" stroke="#E91E63" dot={false} strokeWidth={2} name="Predicted" />
+          </LineChart>
+        </ResponsiveContainer>
+        <div className="mt-2">
+          <span className="badge bg-primary me-2">Actual</span>
+          <span className="badge bg-danger me-2">Predicted</span>
+          <small className="text-muted ms-2">5-minute candles for {date}</small>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TrainModelPanel: React.FC = () => {
+  const [symbol, setSymbol] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [years, setYears] = useState<number>(2);
+  const [horizon, setHorizon] = useState<number>(1);
+  const [lookback, setLookback] = useState<number>(60);
+  const [epochs, setEpochs] = useState<number>(15);
+  const [steps, setSteps] = useState<number>(3);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [trainingInfo, setTrainingInfo] = useState<any>(null);
+  const [overlaySeries, setOverlaySeries] = useState<any[]>([]);
+  const [prediction, setPrediction] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [rlSymbol, setRlSymbol] = useState<'NIFTY' | 'BANKNIFTY'>('BANKNIFTY');
+  const [rlYears, setRlYears] = useState<number>(3);
+  const [episodes, setEpisodes] = useState<number>(100);
+  const [epsilon, setEpsilon] = useState<number>(1.0);
+  const [epsilonDecay, setEpsilonDecay] = useState<number>(0.995);
+  const [rlLoading, setRlLoading] = useState<boolean>(false);
+  const [rlTrainingInfo, setRlTrainingInfo] = useState<any>(null);
+  const [rlEvaluationResults, setRlEvaluationResults] = useState<any>(null);
+
+  const trainModel = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/ai/lstm/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, years, horizon, lookback, epochs }),
+      });
+      if (!response.ok) throw new Error('Training failed');
+      const data = await response.json();
+      setTrainingInfo(data);
+    } catch (e: any) {
+      setError(e.message || 'Training error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runPrediction = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/ai/lstm/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, horizon, steps }),
+      });
+      if (!response.ok) throw new Error('Prediction failed');
+      const data = await response.json();
+      setPrediction(data);
+    } catch (e: any) {
+      setError(e.message || 'Prediction error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchOverlay = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`http://localhost:8000/api/ai/lstm/overlay?symbol=${symbol}`);
+      if (!response.ok) throw new Error('Overlay fetch failed');
+      const data = await response.json();
+      setOverlaySeries(data.series || []);
+    } catch (e: any) {
+      setError(e.message || 'Overlay error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const trainRL = async () => {
+    setError(null);
+    setRlLoading(true);
+    setRlTrainingInfo(null);
+    setRlEvaluationResults(null);
+    try {
+      const payload = { symbol: rlSymbol, years: rlYears, episodes, epsilon, epsilon_decay: epsilonDecay };
+      const res = await fetch('/api/rl/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'RL training failed');
+      setRlTrainingInfo(data);
+    } catch (e: any) {
+      setError(e.message || 'RL training error');
+    } finally {
+      setRlLoading(false);
+    }
+  };
+
+  const evaluateRL = async () => {
+    setError(null);
+    setRlLoading(true);
+    setRlEvaluationResults(null);
+    try {
+      const params = new URLSearchParams({ symbol: rlSymbol, years: '0.5' });
+      const res = await fetch(`/api/rl/evaluate?${params.toString()}`);
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'RL evaluation failed');
+      setRlEvaluationResults(data);
+    } catch (e: any) {
+      setError(e.message || 'RL evaluation error');
+    } finally {
+      setRlLoading(false);
+    }
+  };
+
+  return (
+    <div className="card border-0 shadow-sm">
+      <div className="card-header bg-secondary text-white">
+        <h6 className="mb-0">
+          <i className="bi bi-graph-up-arrow me-2"></i>
+          LSTM Price Predictions (Phase 1)
+        </h6>
+      </div>
+      <div className="card-body">
+        <div className="row g-3 align-items-end">
+          <div className="col-md-2">
+            <label className="form-label">Symbol</label>
+            <select className="form-select" value={symbol} onChange={(e) => setSymbol(e.target.value as any)}>
+              <option value="NIFTY">NIFTY</option>
+              <option value="BANKNIFTY">BANKNIFTY</option>
+            </select>
+          </div>
+          <div className="col-md-2">
+            <label className="form-label">Years</label>
+            <select className="form-select" value={years} onChange={(e) => setYears(Number(e.target.value))}>
+              <option value={2}>2</option>
+              <option value={3}>3</option>
+            </select>
+          </div>
+          <div className="col-md-2">
+            <label className="form-label">Horizon (candles)</label>
+            <select className="form-select" value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}>
+              {[1, 2, 3, 4, 5, 6].map((h) => (
+                <option key={h} value={h}>{h}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col-md-2">
+            <label className="form-label">Lookback</label>
+            <input className="form-control" type="number" value={lookback} min={30} max={200} onChange={(e) => setLookback(Number(e.target.value))} />
+          </div>
+          <div className="col-md-2">
+            <label className="form-label">Epochs</label>
+            <input className="form-control" type="number" value={epochs} min={5} max={50} onChange={(e) => setEpochs(Number(e.target.value))} />
+          </div>
+          <div className="col-md-2">
+            <label className="form-label">Predict Steps</label>
+            <select className="form-select" value={steps} onChange={(e) => setSteps(Number(e.target.value))}>
+              {[1, 2, 3, 4, 5, 6].map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-3 d-flex gap-2">
+          <button className="btn btn-primary" onClick={trainModel} disabled={loading}>
+            {loading ? 'Training...' : 'Train Model'}
+          </button>
+          <button className="btn btn-outline-primary" onClick={runPrediction} disabled={loading}>
+            {loading ? 'Predicting...' : 'Predict Next'}
+          </button>
+          <button className="btn btn-outline-secondary" onClick={fetchOverlay} disabled={loading}>
+            {loading ? 'Loading...' : 'Show 3Y Overlay (70/30)'}
+          </button>
+        </div>
+
+        {error && (
+          <div className="alert alert-danger mt-3" role="alert">
+            <i className="bi bi-exclamation-triangle me-2"></i>
+            {error}
+          </div>
+        )}
+
+        {trainingInfo && (
+          <div className="mt-3">
+            <div className="alert alert-success">
+              <strong>Model Trained:</strong> {trainingInfo.symbol} h{trainingInfo.horizon} | Test MSE: {trainingInfo.test_mse ?? 'N/A'}
+            </div>
+            <pre className="bg-light p-2 rounded" style={{ maxHeight: 200, overflow: 'auto' }}>
+{JSON.stringify({ loss: trainingInfo.history?.loss?.slice(-5), val_loss: trainingInfo.history?.val_loss?.slice(-5) }, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        {prediction && (
+          <div className="mt-3">
+            <div className="alert alert-info">
+              <strong>Predictions ({steps} candles ahead):</strong>
+              <div className="mt-2">
+                {prediction.predictions.map((p: number, i: number) => (
+                  <span key={i} className="badge bg-secondary me-2">T+{i + 1}: ₹{p.toFixed(2)}</span>
+                ))}
+              </div>
+              <div className="mt-2"><strong>Confidence:</strong> {(prediction.confidence * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+        )}
+
+        {overlaySeries.length > 0 && (
+          <div className="mt-3">
+            <h6>Actual vs Predicted (3 years, 70/30 split)</h6>
+            <OverlayChart data={overlaySeries} />
+          </div>
+        )}
+
+        <hr className="my-4" />
+
+        <div className="card border-0 shadow-sm">
+          <div className="card-header bg-success text-white">
+            <h6 className="mb-0">
+              <i className="bi bi-robot me-2"></i>
+              Reinforcement Learning - Mountain Signal Strategy
+            </h6>
+          </div>
+          <div className="card-body">
+            <div className="alert alert-info">
+              <strong>About:</strong> This RL agent learns to trade using Mountain Signal strategy rules.
+              It uses Deep Q-Network (DQN) to optimize entry/exit decisions based on PE/CE signals, RSI, and EMA indicators.
+            </div>
+
+            <div className="row g-3 align-items-end mb-3">
+              <div className="col-md-3">
+                <label className="form-label">Symbol</label>
+                <select className="form-select" value={rlSymbol} onChange={(e) => setRlSymbol(e.target.value as any)}>
+                  <option value="NIFTY">NIFTY</option>
+                  <option value="BANKNIFTY">BANKNIFTY</option>
+                </select>
+              </div>
+              <div className="col-md-2">
+                <label className="form-label">Years</label>
+                <select className="form-select" value={rlYears} onChange={(e) => setRlYears(Number(e.target.value))}>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                </select>
+              </div>
+              <div className="col-md-2">
+                <label className="form-label">Episodes</label>
+                <input className="form-control" type="number" value={episodes} min={50} max={500} onChange={(e) => setEpisodes(Number(e.target.value))} />
+              </div>
+              <div className="col-md-2">
+                <label className="form-label">Epsilon</label>
+                <input className="form-control" type="number" step="0.1" value={epsilon} min={0.1} max={1.0} onChange={(e) => setEpsilon(Number(e.target.value))} />
+              </div>
+              <div className="col-md-3">
+                <label className="form-label">Epsilon Decay</label>
+                <input className="form-control" type="number" step="0.001" value={epsilonDecay} min={0.9} max={0.999} onChange={(e) => setEpsilonDecay(Number(e.target.value))} />
+              </div>
+            </div>
+
+            <div className="d-flex gap-2 mb-3">
+              <button className="btn btn-success" onClick={trainRL} disabled={rlLoading}>
+                {rlLoading ? 'Training...' : 'Train RL Agent'}
+              </button>
+              <button className="btn btn-outline-success" onClick={evaluateRL} disabled={rlLoading || !rlTrainingInfo}>
+                {rlLoading ? 'Evaluating...' : 'Evaluate on Test Data'}
+              </button>
+            </div>
+
+            {rlTrainingInfo && (
+              <div className="mt-3">
+                <div className="alert alert-success">
+                  <h6><strong>Training Complete!</strong></h6>
+                  <div className="row">
+                    <div className="col-md-6">
+                      <p><strong>Symbol:</strong> {rlTrainingInfo.symbol}</p>
+                      <p><strong>Episodes:</strong> {rlTrainingInfo.episodes}</p>
+                      <p><strong>Final Reward:</strong> {rlTrainingInfo.final_reward?.toFixed(2) || 'N/A'}</p>
+                      <p><strong>Final PnL:</strong> ₹{rlTrainingInfo.final_pnl?.toFixed(2) || 'N/A'}</p>
+                    </div>
+                    <div className="col-md-6">
+                      <p><strong>Total Trades:</strong> {rlTrainingInfo.trade_count ?? 'N/A'}</p>
+                      <p><strong>Win Ratio:</strong> {(rlTrainingInfo.win_ratio * 100).toFixed(1)}%</p>
+                      <p><strong>Max Drawdown:</strong> {rlTrainingInfo.max_drawdown?.toFixed(2) || 'N/A'}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {rlEvaluationResults && (
+              <div className="mt-3">
+                <div className="alert alert-primary">
+                  <h6><strong>Evaluation Results</strong></h6>
+                  <p><strong>Period:</strong> {rlEvaluationResults.period}</p>
+                  <p><strong>Net PnL:</strong> ₹{rlEvaluationResults.pnl?.toFixed(2)}</p>
+                  <p><strong>Winning Trades:</strong> {rlEvaluationResults.wins}</p>
+                  <p><strong>Losing Trades:</strong> {rlEvaluationResults.losses}</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
