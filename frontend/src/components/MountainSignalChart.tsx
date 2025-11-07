@@ -101,6 +101,31 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     pnlPercent: number | null;
   }>>([]);
   
+  // Real Option Contract Trade History
+  const [optionTradeHistory, setOptionTradeHistory] = useState<Array<{
+    signalIndex: number;
+    signalTime: string;
+    signalType: 'PE' | 'CE';
+    signalHigh: number;
+    signalLow: number;
+    indexAtEntry: number;
+    atmStrike: number;
+    optionSymbol: string;
+    entryIndex: number;
+    entryTime: string;
+    optionEntryPrice: number; // Option contract premium
+    exitIndex: number | null;
+    exitTime: string | null;
+    optionExitPrice: number | null; // Option contract premium
+    exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
+    stopLossPrice: number; // 17% below entry
+    targetPrice: number; // 45% above entry
+    pnl: number | null;
+    pnlPercent: number | null;
+    status?: string;
+  }>>([]);
+  const [optionLtpMap, setOptionLtpMap] = useState<Record<string, number>>({});
+  
   // Backtest state
   const [backtestFromDate, setBacktestFromDate] = useState<string>('');
   const [backtestToDate, setBacktestToDate] = useState<string>('');
@@ -143,6 +168,60 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
   const emaPeriod = strategy.ema_period || 5;
   const candleTime = parseInt(strategy.candle_time) || 5;
+  const instrument = strategy.instrument; // NIFTY or BANKNIFTY
+  
+  // Helper function to round to nearest ATM strike
+  const roundToATM = (price: number, instrument: string): number => {
+    if (instrument.toUpperCase().includes('NIFTY') && !instrument.toUpperCase().includes('BANK')) {
+      // NIFTY: Round to nearest 50
+      return Math.round(price / 50) * 50;
+    } else {
+      // BANKNIFTY: Round to nearest 100
+      return Math.round(price / 100) * 100;
+    }
+  };
+  
+  // Helper function to get option symbol with proper format
+  const getOptionSymbol = (strike: number, optionType: 'PE' | 'CE', instrument: string, date: string): string => {
+    const instrumentName = instrument.toUpperCase().includes('BANK') ? 'BANKNIFTY' : 'NIFTY';
+    
+    // Get year (last 2 digits) and month from the date
+    const dateObj = new Date(date);
+    const year = dateObj.getFullYear().toString().slice(-2); // Last 2 digits (e.g., 2025 → 25)
+    const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const month = monthNames[dateObj.getMonth()];
+    
+    // Format: BANKNIFTY25NOV57700PE or NIFTY25NOV19550CE
+    return `${instrumentName}${year}${month}${strike}${optionType}`;
+  };
+  
+  // Simulate option premium (for visualization - in real trading, fetch from API)
+  const simulateOptionPremium = (indexPrice: number, strike: number, optionType: 'PE' | 'CE'): number => {
+    // Simple simulation: premium based on distance from ATM
+    const distance = Math.abs(indexPrice - strike);
+    const distancePercent = distance / strike;
+    
+    // Base premium (simplified model)
+    let premium = 100; // Base premium
+    
+    if (optionType === 'PE') {
+      // PE: More valuable when strike > index (ITM)
+      if (strike > indexPrice) {
+        premium += distance * 0.5; // ITM premium
+      } else {
+        premium -= distance * 0.3; // OTM discount
+      }
+    } else {
+      // CE: More valuable when strike < index (ITM)
+      if (strike < indexPrice) {
+        premium += distance * 0.5; // ITM premium
+      } else {
+        premium -= distance * 0.3; // OTM discount
+      }
+    }
+    
+    return Math.max(10, premium); // Minimum ₹10
+  };
 
   // Set today's date as default
   useEffect(() => {
@@ -171,13 +250,81 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
       const data: ChartDataResponse = await response.json();
       setChartData(data);
-      setLastUpdateTime(new Date()); // Track when data was last updated
+      const fetchTimestamp = new Date();
+      setLastUpdateTime(fetchTimestamp); // Track when data was last updated
 
       if (data.candles.length === 0) {
         setError('No data available for the selected date');
       } else {
-        // Process Mountain Signal logic
-        processMountainSignalLogic(data);
+        // Process Mountain Signal logic (returns simulated option trades as fallback)
+        const simulatedOptionTrades = processMountainSignalLogic(data) || [];
+        setOptionLtpMap({});
+
+        let optionTradesSetFromServer = false;
+
+        try {
+          const optionHistoryResponse = await fetch(
+            `http://localhost:8000/api/option_trade_history?instrument=${encodeURIComponent(strategy.instrument)}`,
+            { credentials: 'include' }
+          );
+
+          if (optionHistoryResponse.ok) {
+            const optionData = await optionHistoryResponse.json();
+            if (optionData.status === 'success' && Array.isArray(optionData.trades) && optionData.trades.length > 0) {
+              const normalizedTrades = optionData.trades.map((trade: any) => ({
+                signalTime: trade.signalTime,
+                signalType: trade.signalType,
+                signalHigh: trade.signalHigh,
+                signalLow: trade.signalLow,
+                indexAtEntry: trade.indexAtEntry,
+                atmStrike: trade.atmStrike,
+                optionSymbol: trade.optionSymbol,
+                entryTime: trade.entryTime,
+                optionEntryPrice: trade.optionEntryPrice,
+                stopLossPrice: trade.stopLossPrice,
+                targetPrice: trade.targetPrice,
+                optionExitPrice: trade.optionExitPrice,
+                exitTime: trade.exitTime,
+                exitType: trade.exitType,
+                pnl: trade.pnl,
+                pnlPercent: trade.pnlPercent,
+                status: trade.status || 'open'
+              }));
+
+              setOptionTradeHistory(normalizedTrades);
+              optionTradesSetFromServer = true;
+
+               const openSymbols = normalizedTrades
+                 .filter((trade: typeof normalizedTrades[number]) => trade.status !== 'closed' && !!trade.optionSymbol)
+                 .map((trade: typeof normalizedTrades[number]) => trade.optionSymbol as string);
+
+               if (openSymbols.length > 0) {
+                 try {
+                   const uniqueSymbols = Array.from(new Set(openSymbols));
+                   const ltpResp = await fetch(
+                     `http://localhost:8000/api/option_ltp?symbols=${encodeURIComponent(uniqueSymbols.join(','))}`,
+                     { credentials: 'include' }
+                   );
+                   if (ltpResp.ok) {
+                     const ltpData = await ltpResp.json();
+                     if (ltpData.status === 'success' && ltpData.ltp) {
+                       setOptionLtpMap(ltpData.ltp);
+                     }
+                   }
+                 } catch (ltpError) {
+                   console.error('Error fetching option LTP data:', ltpError);
+                 }
+               }
+            }
+          }
+        } catch (optionError) {
+          console.error('Error fetching option trade history:', optionError);
+        }
+
+        if (!optionTradesSetFromServer) {
+          setOptionTradeHistory(simulatedOptionTrades);
+          setOptionLtpMap({});
+        }
       }
     } catch (err) {
       console.error('Error fetching chart data:', err);
@@ -700,6 +847,128 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     }
 
     setTradeHistory(history);
+    
+    // Build option contract trade history (real trade simulation)
+    const optionHistory: typeof optionTradeHistory = [];
+    let activeOptionTrade: typeof optionTradeHistory[0] | null = null;
+    
+    // Process all candles to check for option stop loss hits (on every candle, not just on index exit)
+    for (let i = emaPeriod; i < candles.length; i++) {
+      const candle = candles[i];
+      const indexPrice = candle.c;
+      
+      // Check for new entries from trade events
+      const entryEvent = trades.find(e => e.type === 'ENTRY' && e.index === i);
+      if (entryEvent) {
+        const signalCandle = signals.find(s => s.index === entryEvent.signalCandleIndex);
+        if (signalCandle) {
+          // Get index price at entry
+          const indexAtEntry = candle.c; // Index close price at entry
+          
+          // Calculate ATM strike
+          const atmStrike = roundToATM(indexAtEntry, instrument);
+          
+          // Get option symbol with proper format (e.g., BANKNIFTY25NOV57700PE)
+          const optionSymbol = getOptionSymbol(atmStrike, entryEvent.tradeType, instrument, candle.x);
+          
+          // Simulate option entry premium
+          const optionEntryPrice = simulateOptionPremium(indexAtEntry, atmStrike, entryEvent.tradeType);
+          
+          // Calculate 17% stop loss (below entry for bought options)
+          const stopLossPrice = optionEntryPrice - (optionEntryPrice * 0.17);
+          
+          // Calculate 45% target profit (above entry for bought options)
+          const targetPrice = optionEntryPrice + (optionEntryPrice * 0.45);
+          
+          activeOptionTrade = {
+            signalIndex: signalCandle.index,
+            signalTime: signalCandle.time,
+            signalType: signalCandle.type,
+            signalHigh: signalCandle.high,
+            signalLow: signalCandle.low,
+            indexAtEntry,
+            atmStrike,
+            optionSymbol,
+            entryIndex: i,
+            entryTime: entryEvent.time,
+            optionEntryPrice,
+            exitIndex: null,
+            exitTime: null,
+            optionExitPrice: null,
+            exitType: null,
+            stopLossPrice,
+            targetPrice,
+            pnl: null,
+            pnlPercent: null,
+            status: 'open'
+          };
+        }
+      }
+      
+      // Check for exits from trade events (index-based exits)
+      const exitEvent = trades.find(e => (e.type === 'STOP_LOSS' || e.type === 'TARGET' || e.type === 'MKT_CLOSE') && e.index === i);
+      
+      // If active option trade exists, check for option-based stop loss/target or index-based exit
+      if (activeOptionTrade) {
+        // Calculate current option premium
+        const currentOptionPremium = simulateOptionPremium(indexPrice, activeOptionTrade.atmStrike, activeOptionTrade.signalType);
+        
+        // Check for 17% option stop loss hit (PRIORITY 1)
+        if (currentOptionPremium <= activeOptionTrade.stopLossPrice) {
+          // Option stop loss hit
+          activeOptionTrade.exitIndex = i;
+          activeOptionTrade.exitTime = candle.x;
+          activeOptionTrade.exitType = 'STOP_LOSS';
+          activeOptionTrade.optionExitPrice = currentOptionPremium;
+          
+          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
+          activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
+          activeOptionTrade.status = 'closed';
+          
+          optionHistory.push({ ...activeOptionTrade });
+          activeOptionTrade = null;
+        }
+        // Check for 45% option target profit hit (PRIORITY 2)
+        else if (currentOptionPremium >= activeOptionTrade.targetPrice) {
+          // Option target hit
+          activeOptionTrade.exitIndex = i;
+          activeOptionTrade.exitTime = candle.x;
+          activeOptionTrade.exitType = 'TARGET';
+          activeOptionTrade.optionExitPrice = currentOptionPremium;
+          
+          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
+          activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
+          activeOptionTrade.status = 'closed';
+          
+          optionHistory.push({ ...activeOptionTrade });
+          activeOptionTrade = null;
+        }
+        // Check for market close (PRIORITY 3)
+        else if (exitEvent && exitEvent.type === 'MKT_CLOSE') {
+          activeOptionTrade.exitIndex = i;
+          activeOptionTrade.exitTime = exitEvent.time;
+          activeOptionTrade.exitType = 'MKT_CLOSE';
+          activeOptionTrade.optionExitPrice = currentOptionPremium;
+          
+          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
+          activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
+          activeOptionTrade.status = 'closed';
+          
+          optionHistory.push({ ...activeOptionTrade });
+          activeOptionTrade = null;
+        }
+      }
+    }
+    
+    // If there's an open option trade, add it without exit
+    if (activeOptionTrade) {
+      optionHistory.push(activeOptionTrade);
+    }
+    
+    return optionHistory;
   };
 
   // Format time for display
@@ -2047,6 +2316,262 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     <td>
                       {(() => {
                         const filteredTrades = tradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        const closedTrades = filteredTrades.filter(t => t.exitTime).length;
+                        const openTrades = filteredTrades.filter(t => !t.exitTime).length;
+                        return (
+                          <>
+                            <span className="badge bg-secondary me-1">{closedTrades} Closed</span>
+                            {openTrades > 0 && <span className="badge bg-success">{openTrades} Open</span>}
+                          </>
+                        );
+                      })()}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Real Option Contract Trade Implementation */}
+      {optionTradeHistory.length > 0 && (
+        <div className="card border-0 shadow-sm mt-3">
+          <div className="card-header bg-success text-white">
+            <h5 className="card-title mb-0">
+              <i className="bi bi-currency-rupee me-2"></i>
+              Real Option Contract Trades (Simulation)
+            </h5>
+            <small className="text-white-50">
+              Signals based on Index | Trades executed on Option Contracts | 17% Stop Loss on Premium
+            </small>
+          </div>
+          <div className="card-body">
+            <div className="alert alert-primary">
+              <strong>Trade Logic:</strong>
+              <ul className="mb-0 mt-2 small">
+                <li><strong>Signal:</strong> Identified using index price (EMA + RSI) - Evaluated 20 sec before candle close</li>
+                <li><strong>Entry:</strong> At breakout, select ATM option contract (NIFTY: nearest 50 | BANKNIFTY: nearest 100)</li>
+                <li><strong>Stop Loss:</strong> 17% below option premium entry price (e.g., Entry ₹100 → SL ₹83)</li>
+                <li><strong>Target Profit:</strong> 45% above option premium entry price (e.g., Entry ₹100 → Target ₹145)</li>
+                <li><strong>Exit Priority:</strong> 1) Option SL (-17%) 2) Option Target (+45%) 3) Market Close (3:15 PM)</li>
+                <li><strong>Lot Size:</strong> NIFTY: 50 | BANKNIFTY: 15</li>
+                <li><strong>Expiry:</strong> NIFTY: Weekly | BANKNIFTY: Monthly</li>
+                <li><strong>Symbol Format:</strong> BANKNIFTY25NOV57700PE or NIFTY25NOV19550CE (Year + Month + Strike + Type)</li>
+              </ul>
+            </div>
+            
+            <div className="table-responsive">
+              <table className="table table-hover table-striped">
+                <thead className="table-success">
+                  <tr>
+                    <th>#</th>
+                    <th>Signal Time</th>
+                    <th>Type</th>
+                    <th>Index @ Entry</th>
+                    <th>ATM Strike</th>
+                    <th>Option Symbol</th>
+                    <th>Entry Time</th>
+                    <th>Entry Premium</th>
+                    <th>Stop Loss (-17%)</th>
+                    <th>Target (+45%)</th>
+                    <th>Exit Time</th>
+                    <th>Exit Premium</th>
+                    <th>Exit Reason</th>
+                    <th>P&L</th>
+                    <th>P&L %</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {optionTradeHistory.filter(trade => (trade.signalType === 'PE' && filterPE) || (trade.signalType === 'CE' && filterCE)).map((trade, index) => {
+                    // Calculate live P&L for open option trades
+                    const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                    let liveOptionPremium = trade.optionExitPrice;
+                    let livePnl = trade.pnl;
+                    let livePnlPercent = trade.pnlPercent;
+                    
+                    // If trade is open and we have latest index price, calculate live option premium
+                    if (!trade.exitTime && latestClose) {
+                      const liveOptionLtp = trade.optionSymbol ? optionLtpMap[trade.optionSymbol] : undefined;
+                      if (liveOptionLtp !== undefined) {
+                        liveOptionPremium = liveOptionLtp;
+                      } else {
+                        liveOptionPremium = simulateOptionPremium(latestClose, trade.atmStrike, trade.signalType);
+                      }
+                      const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+                      livePnl = (liveOptionPremium - trade.optionEntryPrice) * lotSize;
+                      livePnlPercent = ((liveOptionPremium - trade.optionEntryPrice) / trade.optionEntryPrice) * 100;
+                    }
+                    
+                    return (
+                      <tr key={index} className={!trade.exitTime ? 'table-warning' : ''}>
+                        <td><strong>{index + 1}</strong></td>
+                        <td>{formatDateTime(trade.signalTime)}</td>
+                        <td>
+                          <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                            {trade.signalType}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>{trade.indexAtEntry.toFixed(2)}</strong>
+                        </td>
+                        <td>
+                          <span className="badge bg-primary">{Math.round(trade.atmStrike)}</span>
+                        </td>
+                        <td>
+                          <code className="small">{trade.optionSymbol}</code>
+                        </td>
+                        <td>{formatDateTime(trade.entryTime)}</td>
+                        <td>
+                          <strong className="text-success">₹{trade.optionEntryPrice.toFixed(2)}</strong>
+                        </td>
+                        <td>
+                          <span className="text-danger fw-bold">
+                            ₹{trade.stopLossPrice.toFixed(2)}
+                            {!trade.exitTime && liveOptionPremium && liveOptionPremium <= trade.stopLossPrice && (
+                              <span className="badge bg-danger ms-2">SL HIT!</span>
+                            )}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="text-success fw-bold">
+                            ₹{trade.targetPrice.toFixed(2)}
+                            {!trade.exitTime && liveOptionPremium && liveOptionPremium >= trade.targetPrice && (
+                              <span className="badge bg-success ms-2">TARGET HIT!</span>
+                            )}
+                          </span>
+                        </td>
+                        <td>
+                          {trade.exitTime ? formatDateTime(trade.exitTime) : (
+                            <span className="text-primary fw-bold">
+                              <i className="bi bi-activity me-1"></i>Live
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          {trade.optionExitPrice ? (
+                            `₹${trade.optionExitPrice.toFixed(2)}`
+                          ) : (
+                            liveOptionPremium ? (
+                              <span className="text-primary fw-bold">
+                                ₹{liveOptionPremium.toFixed(2)} <small className="text-muted">(LTP)</small>
+                              </span>
+                            ) : (
+                              <span className="text-muted">-</span>
+                            )
+                          )}
+                        </td>
+                        <td>
+                          {trade.exitType ? (
+                            <span className={`badge ${
+                              trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
+                              trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 
+                              'bg-warning'
+                            }`}>
+                            {trade.exitType === 'STOP_LOSS' ? 'Stop Loss (-17%)' : 
+                             trade.exitType === 'MKT_CLOSE' ? 'Market Close' : 
+                             'Target (+45%)'}
+                            </span>
+                          ) : (
+                            <span className="badge bg-info">Pending</span>
+                          )}
+                        </td>
+                        <td>
+                          {livePnl !== null ? (
+                            <span className={`fw-bold ${livePnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                              {livePnl >= 0 ? '+' : ''}₹{livePnl.toFixed(2)}
+                              {!trade.exitTime && <small className="text-muted ms-1">(Live)</small>}
+                            </span>
+                          ) : (
+                            <span className="text-muted">-</span>
+                          )}
+                        </td>
+                        <td>
+                          {livePnlPercent !== null ? (
+                            <span className={`fw-bold ${livePnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                              {livePnlPercent >= 0 ? '+' : ''}{livePnlPercent.toFixed(2)}%
+                              {!trade.exitTime && <small className="text-muted ms-1">(Live)</small>}
+                            </span>
+                          ) : (
+                            <span className="text-muted">-</span>
+                          )}
+                        </td>
+                        <td>
+                          {trade.exitTime ? (
+                            <span className="badge bg-secondary">Closed</span>
+                          ) : (
+                            <span className="badge bg-success">
+                              <i className="bi bi-broadcast me-1"></i>Open
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {/* Summary Row */}
+                  <tr className="table-success fw-bold">
+                    <td colSpan={13} className="text-end">Total P&L (Option Contracts):</td>
+                    <td>
+                      {(() => {
+                        const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                        const filteredTrades = optionTradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        
+                        const totalPnL = filteredTrades.reduce((sum, t) => {
+                          if (t.pnl !== null) {
+                            return sum + t.pnl;
+                          } else if (latestClose) {
+                            // Open trade - calculate live P&L
+                            const liveOptionLtp = t.optionSymbol ? optionLtpMap[t.optionSymbol] : undefined;
+                            const liveOptionPremium = liveOptionLtp !== undefined ? liveOptionLtp : simulateOptionPremium(latestClose, t.atmStrike, t.signalType);
+                            const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+                            const livePnl = (liveOptionPremium - t.optionEntryPrice) * lotSize;
+                            return sum + livePnl;
+                          }
+                          return sum;
+                        }, 0);
+                        
+                        const hasOpenTrades = filteredTrades.some(t => !t.exitTime);
+                        
+                        return (
+                          <span className={totalPnL >= 0 ? 'text-success' : 'text-danger'}>
+                            {totalPnL >= 0 ? '+' : ''}₹{totalPnL.toFixed(2)}
+                            {hasOpenTrades && <small className="text-muted ms-1">(Live)</small>}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td>
+                      {(() => {
+                        const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                        const filteredTrades = optionTradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        
+                        const totalPnLPercent = filteredTrades.reduce((sum, t) => {
+                          if (t.pnlPercent !== null) {
+                            return sum + t.pnlPercent;
+                          } else if (latestClose) {
+                            // Open trade - calculate live P&L %
+                            const liveOptionLtp = t.optionSymbol ? optionLtpMap[t.optionSymbol] : undefined;
+                            const liveOptionPremium = liveOptionLtp !== undefined ? liveOptionLtp : simulateOptionPremium(latestClose, t.atmStrike, t.signalType);
+                            const livePnlPercent = ((liveOptionPremium - t.optionEntryPrice) / t.optionEntryPrice) * 100;
+                            return sum + livePnlPercent;
+                          }
+                          return sum;
+                        }, 0);
+                        
+                        const hasOpenTrades = filteredTrades.some(t => !t.exitTime);
+                        
+                        return (
+                          <span className={totalPnLPercent >= 0 ? 'text-success' : 'text-danger'}>
+                            {totalPnLPercent >= 0 ? '+' : ''}{totalPnLPercent.toFixed(2)}%
+                            {hasOpenTrades && <small className="text-muted ms-1">(Live)</small>}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td>
+                      {(() => {
+                        const filteredTrades = optionTradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
                         const closedTrades = filteredTrades.filter(t => t.exitTime).length;
                         const openTrades = filteredTrades.filter(t => !t.exitTime).length;
                         return (

@@ -408,6 +408,92 @@ def api_chart_data():
         logging.error(f"/api/chart_data error: {e}", exc_info=True)
         return jsonify({'candles': [], 'ema': []}), 200
 
+
+@app.route('/api/option_ltp', methods=['GET'])
+def api_option_ltp():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    symbols_raw = request.args.get('symbols', '')
+    if not symbols_raw:
+        return jsonify({'status': 'error', 'message': 'No symbols provided'}), 400
+
+    symbol_list = [s.strip().upper() for s in symbols_raw.split(',') if s.strip()]
+    if not symbol_list:
+        return jsonify({'status': 'error', 'message': 'No valid symbols provided'}), 400
+
+    try:
+        if 'access_token' in session:
+            kite.set_access_token(session['access_token'])
+    except Exception as e:
+        logging.error(f"Error setting access token for option LTP: {e}")
+
+    try:
+        ltp_request_tokens = []
+        symbol_map = {}
+        for sym in symbol_list:
+            token = sym if sym.startswith('NFO:') else f"NFO:{sym}"
+            ltp_request_tokens.append(token)
+            symbol_map[token] = sym
+
+        ltp_response = kite.ltp(ltp_request_tokens)
+
+        result = {}
+        for token_key, data in ltp_response.items():
+            sym = symbol_map.get(token_key, token_key.replace('NFO:', ''))
+            result[sym] = data.get('last_price')
+
+        return jsonify({'status': 'success', 'ltp': result})
+    except Exception as e:
+        logging.error(f"Error fetching option LTP: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/option_trade_history', methods=['GET'])
+def api_option_trade_history():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    instrument_filter = request.args.get('instrument')
+    trades_response = []
+
+    for strategy_id, pt_info in paper_trade_strategies.items():
+        strategy = pt_info.get('strategy')
+        if not strategy or not hasattr(strategy, 'get_option_trade_history'):
+            continue
+
+        if instrument_filter and strategy.instrument != instrument_filter:
+            continue
+
+        option_trades = strategy.get_option_trade_history()
+        for trade in option_trades:
+            try:
+                trades_response.append({
+                    'strategyId': strategy_id,
+                    'signalTime': trade.get('signal_time'),
+                    'signalType': trade.get('signal_type'),
+                    'signalHigh': float(trade.get('signal_high', 0)),
+                    'signalLow': float(trade.get('signal_low', 0)),
+                    'indexAtEntry': float(trade.get('index_at_entry', 0)),
+                    'atmStrike': float(trade.get('atm_strike', 0)),
+                    'optionSymbol': trade.get('option_symbol'),
+                    'entryTime': trade.get('entry_time'),
+                    'optionEntryPrice': float(trade.get('option_entry_price', 0)),
+                    'stopLossPrice': float(trade.get('stop_loss_price', 0)),
+                    'targetPrice': float(trade.get('target_price', 0)),
+                    'optionExitPrice': float(trade['option_exit_price']) if trade.get('option_exit_price') is not None else None,
+                    'exitTime': trade.get('exit_time'),
+                    'exitType': trade.get('exit_type'),
+                    'pnl': float(trade['pnl']) if trade.get('pnl') is not None else None,
+                    'pnlPercent': float(trade['pnl_percent']) if trade.get('pnl_percent') is not None else None,
+                    'status': trade.get('status', 'open')
+                })
+            except Exception as error:
+                logging.error(f"Error serializing option trade history: {error}", exc_info=True)
+                continue
+
+    return jsonify({'status': 'success', 'trades': trades_response})
+
 @app.route("/")
 def index():
     if 'user_id' in session:
