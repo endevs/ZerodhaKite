@@ -66,6 +66,17 @@ interface WaitingSignal {
   emaValue: number;
 }
 
+interface RuleConfig {
+  strikeRounding: Record<string, number>;
+  lotSizes: Record<string, number>;
+  optionTrade: {
+    stopLossPercent: number;
+    targetPercent: number;
+  };
+  exitPriority: string[];
+  evaluationSecondsBeforeClose: number;
+}
+
 interface MountainSignalChartProps {
   strategy: Strategy;
   activeTab?: 'chart' | 'backtest';
@@ -118,13 +129,67 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     exitTime: string | null;
     optionExitPrice: number | null; // Option contract premium
     exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
-    stopLossPrice: number; // 17% below entry
-    targetPrice: number; // 45% above entry
+    stopLossPrice: number; // Rule-based stop loss price
+    targetPrice: number; // Rule-based target price
     pnl: number | null;
     pnlPercent: number | null;
     status?: string;
+    lotSize?: number;
   }>>([]);
   const [optionLtpMap, setOptionLtpMap] = useState<Record<string, number>>({});
+  const [ruleConfig, setRuleConfig] = useState<RuleConfig>({
+    strikeRounding: {
+      BANKNIFTY: 100,
+      NIFTY: 50,
+    },
+    lotSizes: {
+      BANKNIFTY: 35,
+      NIFTY: 75,
+    },
+    optionTrade: {
+      stopLossPercent: -0.17,
+      targetPercent: 0.45,
+    },
+    exitPriority: [],
+    evaluationSecondsBeforeClose: 20,
+  });
+
+  useEffect(() => {
+    const loadRuleConfig = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/rules/mountain_signal', {
+          credentials: 'include',
+        });
+        if (!response.ok) {
+          return;
+        }
+        const data = await response.json();
+        if (data.status === 'success' && data.rules) {
+          const rules = data.rules;
+          setRuleConfig((prev) => ({
+            strikeRounding: {
+              ...prev.strikeRounding,
+              ...(rules.strike_rounding || {}),
+            },
+            lotSizes: {
+              ...prev.lotSizes,
+              ...(rules.lot_sizes || {}),
+            },
+            optionTrade: {
+              stopLossPercent: rules.option_trade?.stop_loss_percent ?? prev.optionTrade.stopLossPercent,
+              targetPercent: rules.option_trade?.target_percent ?? prev.optionTrade.targetPercent,
+            },
+            exitPriority: rules.exit_priority || prev.exitPriority,
+            evaluationSecondsBeforeClose: rules.evaluation?.seconds_before_close ?? prev.evaluationSecondsBeforeClose,
+          }));
+        }
+      } catch (rulesError) {
+        console.error('Error loading rule configuration:', rulesError);
+      }
+    };
+
+    loadRuleConfig();
+  }, []);
   
   // Backtest state
   const [backtestFromDate, setBacktestFromDate] = useState<string>('');
@@ -170,16 +235,45 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const candleTime = parseInt(strategy.candle_time) || 5;
   const instrument = strategy.instrument; // NIFTY or BANKNIFTY
   
-  // Helper function to round to nearest ATM strike
-  const roundToATM = (price: number, instrument: string): number => {
-    if (instrument.toUpperCase().includes('NIFTY') && !instrument.toUpperCase().includes('BANK')) {
-      // NIFTY: Round to nearest 50
-      return Math.round(price / 50) * 50;
-    } else {
-      // BANKNIFTY: Round to nearest 100
-      return Math.round(price / 100) * 100;
+  // Helper functions to interpret rule configuration
+  const getInstrumentKey = (symbol: string): string => symbol.toUpperCase();
+
+  const roundToATM = (price: number, instrumentSymbol: string): number => {
+    const key = getInstrumentKey(instrumentSymbol);
+    const rounding = ruleConfig.strikeRounding[key] ?? (key.includes('BANK') ? 100 : 50);
+    if (rounding === 0) {
+      return price;
     }
+    return Math.round(price / rounding) * rounding;
   };
+
+  const getLotSize = (instrumentSymbol: string): number => {
+    const key = getInstrumentKey(instrumentSymbol);
+    return ruleConfig.lotSizes[key] ?? (key.includes('BANK') ? 35 : 75);
+  };
+
+  const formatPercentValue = (value: number): string => {
+    const decimals = Number.isInteger(value) ? 0 : 2;
+    return value.toFixed(decimals);
+  };
+
+  const formatNumericValue = (value: number): string => {
+    const decimals = Number.isInteger(value) ? 0 : 2;
+    return value.toFixed(decimals).replace(/\.00$/, '');
+  };
+
+  const stopLossPercentSigned = ruleConfig.optionTrade.stopLossPercent * 100;
+  const targetPercentSigned = ruleConfig.optionTrade.targetPercent * 100;
+  const stopLossPercentAbsLabel = formatPercentValue(Math.abs(stopLossPercentSigned));
+  const targetPercentAbsLabel = formatPercentValue(Math.abs(targetPercentSigned));
+  const stopLossPercentLabelWithSign = `${stopLossPercentSigned < 0 ? '-' : '+'}${stopLossPercentAbsLabel}`;
+  const targetPercentLabelWithSign = `${targetPercentSigned < 0 ? '-' : '+'}${targetPercentAbsLabel}`;
+
+  const bankLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.BANKNIFTY ?? 35);
+  const niftyLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.NIFTY ?? 75);
+  const bankRoundingDisplay = formatNumericValue(ruleConfig.strikeRounding.BANKNIFTY ?? 100);
+  const niftyRoundingDisplay = formatNumericValue(ruleConfig.strikeRounding.NIFTY ?? 50);
+  const evaluationSecondsDisplay = ruleConfig.evaluationSecondsBeforeClose;
   
   // Helper function to get option symbol with proper format
   const getOptionSymbol = (strike: number, optionType: 'PE' | 'CE', instrument: string, date: string): string => {
@@ -288,7 +382,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 exitType: trade.exitType,
                 pnl: trade.pnl,
                 pnlPercent: trade.pnlPercent,
-                status: trade.status || 'open'
+                status: trade.status || 'open',
+                lotSize: trade.lotSize ?? trade.lot_size ?? getLotSize(strategy.instrument)
               }));
 
               setOptionTradeHistory(normalizedTrades);
@@ -826,13 +921,15 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         activeTradeHistory.exitType = event.type;
         
         // Calculate P&L
+        const indexLotSize = getLotSize(instrument);
+
         if (activeTradeHistory.signalType === 'PE') {
           // PE: Profit when price goes down (exit < entry)
-          activeTradeHistory.pnl = (activeTradeHistory.entryPrice - activeTradeHistory.exitPrice) * 50; // Assuming 50 units per lot
+          activeTradeHistory.pnl = (activeTradeHistory.entryPrice - activeTradeHistory.exitPrice) * indexLotSize;
           activeTradeHistory.pnlPercent = ((activeTradeHistory.entryPrice - activeTradeHistory.exitPrice) / activeTradeHistory.entryPrice) * 100;
         } else {
           // CE: Profit when price goes up (exit > entry)
-          activeTradeHistory.pnl = (activeTradeHistory.exitPrice - activeTradeHistory.entryPrice) * 50;
+          activeTradeHistory.pnl = (activeTradeHistory.exitPrice - activeTradeHistory.entryPrice) * indexLotSize;
           activeTradeHistory.pnlPercent = ((activeTradeHistory.exitPrice - activeTradeHistory.entryPrice) / activeTradeHistory.entryPrice) * 100;
         }
         
@@ -873,12 +970,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           
           // Simulate option entry premium
           const optionEntryPrice = simulateOptionPremium(indexAtEntry, atmStrike, entryEvent.tradeType);
-          
-          // Calculate 17% stop loss (below entry for bought options)
-          const stopLossPrice = optionEntryPrice - (optionEntryPrice * 0.17);
-          
-          // Calculate 45% target profit (above entry for bought options)
-          const targetPrice = optionEntryPrice + (optionEntryPrice * 0.45);
+
+          const stopLossPercent = ruleConfig.optionTrade.stopLossPercent;
+          const targetPercent = ruleConfig.optionTrade.targetPercent;
+
+          // Rule-based stop loss and target (expressed as percentages of premium)
+          const stopLossPrice = optionEntryPrice * (1 + stopLossPercent);
+          const targetPrice = optionEntryPrice * (1 + targetPercent);
+          const lotSize = getLotSize(instrument);
           
           activeOptionTrade = {
             signalIndex: signalCandle.index,
@@ -900,7 +999,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             targetPrice,
             pnl: null,
             pnlPercent: null,
-            status: 'open'
+            status: 'open',
+            lotSize
           };
         }
       }
@@ -913,7 +1013,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         // Calculate current option premium
         const currentOptionPremium = simulateOptionPremium(indexPrice, activeOptionTrade.atmStrike, activeOptionTrade.signalType);
         
-        // Check for 17% option stop loss hit (PRIORITY 1)
+        // Check for rule-based option stop loss hit (PRIORITY 1)
         if (currentOptionPremium <= activeOptionTrade.stopLossPrice) {
           // Option stop loss hit
           activeOptionTrade.exitIndex = i;
@@ -921,7 +1021,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           activeOptionTrade.exitType = 'STOP_LOSS';
           activeOptionTrade.optionExitPrice = currentOptionPremium;
           
-          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          const lotSize = activeOptionTrade.lotSize ?? getLotSize(instrument);
           activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
           activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
           activeOptionTrade.status = 'closed';
@@ -929,7 +1029,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           optionHistory.push({ ...activeOptionTrade });
           activeOptionTrade = null;
         }
-        // Check for 45% option target profit hit (PRIORITY 2)
+        // Check for rule-based option target profit hit (PRIORITY 2)
         else if (currentOptionPremium >= activeOptionTrade.targetPrice) {
           // Option target hit
           activeOptionTrade.exitIndex = i;
@@ -937,7 +1037,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           activeOptionTrade.exitType = 'TARGET';
           activeOptionTrade.optionExitPrice = currentOptionPremium;
           
-          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          const lotSize = activeOptionTrade.lotSize ?? getLotSize(instrument);
           activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
           activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
           activeOptionTrade.status = 'closed';
@@ -952,7 +1052,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           activeOptionTrade.exitType = 'MKT_CLOSE';
           activeOptionTrade.optionExitPrice = currentOptionPremium;
           
-          const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+          const lotSize = activeOptionTrade.lotSize ?? getLotSize(instrument);
           activeOptionTrade.pnl = (activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) * lotSize;
           activeOptionTrade.pnlPercent = ((activeOptionTrade.optionExitPrice - activeOptionTrade.optionEntryPrice) / activeOptionTrade.optionEntryPrice) * 100;
           activeOptionTrade.status = 'closed';
@@ -2343,19 +2443,19 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               Real Option Contract Trades (Simulation)
             </h5>
             <small className="text-white-50">
-              Signals based on Index | Trades executed on Option Contracts | 17% Stop Loss on Premium
+              Signals based on Index | Trades executed on Option Contracts | {stopLossPercentAbsLabel}% Stop Loss on Premium
             </small>
           </div>
           <div className="card-body">
             <div className="alert alert-primary">
               <strong>Trade Logic:</strong>
               <ul className="mb-0 mt-2 small">
-                <li><strong>Signal:</strong> Identified using index price (EMA + RSI) - Evaluated 20 sec before candle close</li>
-                <li><strong>Entry:</strong> At breakout, select ATM option contract (NIFTY: nearest 50 | BANKNIFTY: nearest 100)</li>
-                <li><strong>Stop Loss:</strong> 17% below option premium entry price (e.g., Entry ₹100 → SL ₹83)</li>
-                <li><strong>Target Profit:</strong> 45% above option premium entry price (e.g., Entry ₹100 → Target ₹145)</li>
-                <li><strong>Exit Priority:</strong> 1) Option SL (-17%) 2) Option Target (+45%) 3) Market Close (3:15 PM)</li>
-                <li><strong>Lot Size:</strong> NIFTY: 50 | BANKNIFTY: 15</li>
+                <li><strong>Signal:</strong> Identified using index price (EMA + RSI) – evaluated {evaluationSecondsDisplay} sec before candle close</li>
+                <li><strong>Entry:</strong> At breakout, select ATM option contract (NIFTY: nearest {niftyRoundingDisplay} | BANKNIFTY: nearest {bankRoundingDisplay})</li>
+                <li><strong>Stop Loss:</strong> {stopLossPercentAbsLabel}% below option premium entry price</li>
+                <li><strong>Target Profit:</strong> {targetPercentAbsLabel}% above option premium entry price</li>
+                <li><strong>Exit Priority:</strong> 1) Option SL ({stopLossPercentLabelWithSign}%) 2) Option Target ({targetPercentLabelWithSign}%) 3) Market Close (3:15 PM)</li>
+                <li><strong>Lot Size:</strong> NIFTY: {niftyLotSizeDisplay} | BANKNIFTY: {bankLotSizeDisplay}</li>
                 <li><strong>Expiry:</strong> NIFTY: Weekly | BANKNIFTY: Monthly</li>
                 <li><strong>Symbol Format:</strong> BANKNIFTY25NOV57700PE or NIFTY25NOV19550CE (Year + Month + Strike + Type)</li>
               </ul>
@@ -2373,8 +2473,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     <th>Option Symbol</th>
                     <th>Entry Time</th>
                     <th>Entry Premium</th>
-                    <th>Stop Loss (-17%)</th>
-                    <th>Target (+45%)</th>
+                    <th>Stop Loss ({stopLossPercentLabelWithSign}%)</th>
+                    <th>Target ({targetPercentLabelWithSign}%)</th>
                     <th>Exit Time</th>
                     <th>Exit Premium</th>
                     <th>Exit Reason</th>
@@ -2399,7 +2499,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                       } else {
                         liveOptionPremium = simulateOptionPremium(latestClose, trade.atmStrike, trade.signalType);
                       }
-                      const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+                      const lotSize = trade.lotSize ?? getLotSize(instrument);
                       livePnl = (liveOptionPremium - trade.optionEntryPrice) * lotSize;
                       livePnlPercent = ((liveOptionPremium - trade.optionEntryPrice) / trade.optionEntryPrice) * 100;
                     }
@@ -2469,9 +2569,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                               trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 
                               'bg-warning'
                             }`}>
-                            {trade.exitType === 'STOP_LOSS' ? 'Stop Loss (-17%)' : 
+                            {trade.exitType === 'STOP_LOSS' ? `Stop Loss (${stopLossPercentLabelWithSign}%)` : 
                              trade.exitType === 'MKT_CLOSE' ? 'Market Close' : 
-                             'Target (+45%)'}
+                             `Target (${targetPercentLabelWithSign}%)`}
                             </span>
                           ) : (
                             <span className="badge bg-info">Pending</span>
@@ -2524,7 +2624,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                             // Open trade - calculate live P&L
                             const liveOptionLtp = t.optionSymbol ? optionLtpMap[t.optionSymbol] : undefined;
                             const liveOptionPremium = liveOptionLtp !== undefined ? liveOptionLtp : simulateOptionPremium(latestClose, t.atmStrike, t.signalType);
-                            const lotSize = instrument.toUpperCase().includes('BANK') ? 15 : 50;
+                            const lotSize = t.lotSize ?? getLotSize(instrument);
                             const livePnl = (liveOptionPremium - t.optionEntryPrice) * lotSize;
                             return sum + livePnl;
                           }

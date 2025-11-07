@@ -9,6 +9,7 @@ import time
 from threading import Thread
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
+from rules import load_mountain_signal_pe_rules
 from ticker import Ticker
 import uuid
 import sqlite3
@@ -446,6 +447,17 @@ def api_option_ltp():
         return jsonify({'status': 'success', 'ltp': result})
     except Exception as e:
         logging.error(f"Error fetching option LTP: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/rules/mountain_signal', methods=['GET'])
+def api_rules_mountain_signal():
+    """Expose Mountain Signal (PE) rule configuration for clients."""
+    try:
+        rules_data = load_mountain_signal_pe_rules()
+        return jsonify({'status': 'success', 'rules': rules_data})
+    except Exception as e:
+        logging.error(f"Error loading Mountain Signal rules: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

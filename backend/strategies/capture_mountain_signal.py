@@ -1,6 +1,7 @@
 from .base_strategy import BaseStrategy
 from utils.kite_utils import get_option_symbols
 from utils.indicators import calculate_rsi
+from rules import load_mountain_signal_pe_rules
 import logging
 import datetime
 import re
@@ -120,6 +121,44 @@ class CaptureMountainSignal(BaseStrategy):
         # Track option contract trades (realistic simulation)
         self.option_trade_history = []
         self.active_option_trade = None
+
+        # Load business rules for PE trades from DSL
+        try:
+            self.pe_rules = load_mountain_signal_pe_rules()
+        except Exception as rules_error:
+            logging.error(f"Failed to load Mountain Signal PE rules: {rules_error}", exc_info=True)
+            self.pe_rules = {
+                'option_trade': {
+                    'stop_loss_percent': -0.17,
+                    'target_percent': 0.45
+                },
+                'lot_sizes': {
+                    'BANKNIFTY': 35,
+                    'NIFTY': 75
+                },
+                'strike_rounding': {
+                    'BANKNIFTY': 100,
+                    'NIFTY': 50
+                },
+                'expiry_policy': {
+                    'BANKNIFTY': 'monthly',
+                    'NIFTY': 'weekly'
+                },
+                'evaluation': {
+                    'seconds_before_close': 20
+                },
+                'exit_priority': ['option_stop_loss', 'option_target', 'market_close 15:15']
+            }
+
+        # Apply rule-driven configuration overrides
+        instrument_upper = self.instrument.upper()
+        expiry_policy = self.pe_rules.get('expiry_policy', {})
+        if instrument_upper in expiry_policy:
+            self.expiry_type = expiry_policy[instrument_upper].lower()
+
+        evaluation_settings = self.pe_rules.get('evaluation', {})
+        self._signal_evaluate_seconds = evaluation_settings.get('seconds_before_close', 20)
+        self._signal_evaluate_buffer = evaluation_settings.get('buffer_seconds', 2)
 
     def _aligned_execution_time(self, base_dt: datetime.datetime) -> datetime.datetime:
         """Return the aligned execution time at minute % 5 == 4 and second == 40 for the candle window.
@@ -273,8 +312,14 @@ class CaptureMountainSignal(BaseStrategy):
 
     def _get_option_lot_size(self):
         """Return option lot size based on instrument"""
-        base_lot = 15 if 'BANK' in self.instrument.upper() else 50
-        return base_lot * self.total_lot
+        instrument_name = self.instrument.upper()
+        lot_mapping = self.pe_rules.get('lot_sizes', {})
+        base_lot = lot_mapping.get(instrument_name)
+        if base_lot is None:
+            base_lot = lot_mapping.get('DEFAULT')
+        if base_lot is None:
+            base_lot = 35 if 'BANK' in instrument_name else 75
+        return int(base_lot * self.total_lot)
 
     def _get_option_price_snapshot(self, option_type, instrument_token=None):
         """Fetch latest option LTP using instrument token or cached option prices"""
@@ -299,10 +344,17 @@ class CaptureMountainSignal(BaseStrategy):
         if option_entry_price is None:
             return
 
-        stop_loss_price = option_entry_price * (1 - 0.17)  # 17% below entry
-        target_price = option_entry_price * (1 + 0.45)     # 45% above entry
+        stop_loss_percent = self.pe_rules.get('option_trade', {}).get('stop_loss_percent', -0.17)
+        target_percent = self.pe_rules.get('option_trade', {}).get('target_percent', 0.45)
+
+        stop_loss_price = option_entry_price * (1 + stop_loss_percent)
+        target_price = option_entry_price * (1 + target_percent)
         lot_size = self._get_option_lot_size()
-        atm_strike = extract_strike_from_symbol(option_symbol) or round_to_multiple(index_price, 50 if 'BANK' not in self.instrument.upper() else 100)
+        rounding_map = self.pe_rules.get('strike_rounding', {})
+        rounding_value = rounding_map.get(self.instrument.upper())
+        if rounding_value is None:
+            rounding_value = 50 if 'BANK' not in self.instrument.upper() else 100
+        atm_strike = extract_strike_from_symbol(option_symbol) or round_to_multiple(index_price, rounding_value)
 
         option_trade = {
             'signal_time': signal_time,
@@ -612,19 +664,26 @@ class CaptureMountainSignal(BaseStrategy):
         except Exception:
             pass
 
-        # **SIGNAL EVALUATION TIMING: 20 seconds before candle close**
+        # **SIGNAL EVALUATION TIMING: rule-driven seconds before candle close**
         # Calculate how many seconds we are from the candle end
         candle_duration_seconds = candle_interval_minutes * 60
         seconds_into_candle = (tick_datetime - current_candle_start_time).total_seconds()
         seconds_before_close = candle_duration_seconds - seconds_into_candle
         
-        # Evaluate signal 20 seconds before candle close (with 2-second buffer: 18-22 seconds)
-        # This gives us 99% complete candle data while still being before the official close
-        if 18 <= seconds_before_close <= 22:
+        target_seconds = getattr(self, '_signal_evaluate_seconds', 20)
+        buffer_seconds = getattr(self, '_signal_evaluate_buffer', 2)
+        lower_bound = max(0, target_seconds - buffer_seconds)
+        upper_bound = target_seconds + buffer_seconds
+
+        # Evaluate signal close to candle completion while still prior to close
+        if lower_bound <= seconds_before_close <= upper_bound:
             if not self.signal_evaluated_for_current_candle and len(self.historical_data) > self.ema_period:
                 self._evaluate_signal_candle()
                 self.signal_evaluated_for_current_candle = True
-                logging.info(f"Signal evaluation triggered at {tick_datetime.strftime('%H:%M:%S')} ({seconds_before_close:.1f}s before candle close)")
+                logging.info(
+                    f"Signal evaluation triggered at {tick_datetime.strftime('%H:%M:%S')} "
+                    f"({seconds_before_close:.1f}s before candle close; target {target_seconds}s ± {buffer_seconds}s)"
+                )
 
         # Only run strategy logic if we have enough historical data for EMA calculation
         if len(self.historical_data) > self.ema_period:
@@ -659,8 +718,11 @@ class CaptureMountainSignal(BaseStrategy):
         current_ema = current_candle['ema']
         current_rsi = current_candle['rsi14'] if 'rsi14' in df.columns and pd.notna(current_candle['rsi14']) else None
 
+        timing_seconds = getattr(self, '_signal_evaluate_seconds', 20)
+        timing_label = f"{int(timing_seconds)}s before close"
+
         # --- PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70 ---
-        # Note: We evaluate the forming candle at 20 seconds before close
+        # Note: We evaluate the forming candle shortly before close per rules
         if current_candle['low'] > current_ema:
             # RSI condition must be met at signal identification time
             if current_rsi is not None and current_rsi > 70:
@@ -676,7 +738,7 @@ class CaptureMountainSignal(BaseStrategy):
                         self.signal_candles_with_entry.remove(signal_candle_id)
                 
                 self.pe_signal_candle = current_candle
-                self.status['signal_status'] = f"PE Signal Candle Identified (20s before close): {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
+                self.status['signal_status'] = f"PE Signal Candle Identified ({timing_label}): {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.pe_signal_candle['date'].strftime('%H:%M') + '-' + (self.pe_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
                 self.status['signal_candle_high'] = self.pe_signal_candle['high']
                 self.status['signal_candle_low'] = self.pe_signal_candle['low']
@@ -688,7 +750,7 @@ class CaptureMountainSignal(BaseStrategy):
                     'low': self.pe_signal_candle['low'],
                     'ema': current_ema,
                     'rsi': current_rsi,
-                    'evaluation_timing': '20_seconds_before_close'
+                    'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
                 })
                 # Append to today's signal history
                 try:
@@ -707,7 +769,7 @@ class CaptureMountainSignal(BaseStrategy):
                 logging.info(self.status['signal_status'])
 
         # --- CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30 ---
-        # Note: We evaluate the forming candle at 20 seconds before close
+        # Note: We evaluate the forming candle shortly before close per rules
         if current_candle['high'] < current_ema:
             # RSI condition must be met at signal identification time
             if current_rsi is not None and current_rsi < 30:
@@ -723,7 +785,7 @@ class CaptureMountainSignal(BaseStrategy):
                         self.signal_candles_with_entry.remove(signal_candle_id)
                 
                 self.ce_signal_candle = current_candle
-                self.status['signal_status'] = f"CE Signal Candle Identified (20s before close): {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
+                self.status['signal_status'] = f"CE Signal Candle Identified ({timing_label}): {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.ce_signal_candle['date'].strftime('%H:%M') + '-' + (self.ce_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
                 self.status['signal_candle_high'] = self.ce_signal_candle['high']
                 self.status['signal_candle_low'] = self.ce_signal_candle['low']
@@ -735,7 +797,7 @@ class CaptureMountainSignal(BaseStrategy):
                     'low': self.ce_signal_candle['low'],
                     'ema': current_ema,
                     'rsi': current_rsi,
-                    'evaluation_timing': '20_seconds_before_close'
+                    'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
                 })
                 # Append to today's signal history
                 try:
