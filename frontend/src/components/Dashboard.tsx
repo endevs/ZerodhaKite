@@ -5,7 +5,6 @@ import { io, Socket } from 'socket.io-client';
 import DashboardContent from './DashboardContent';
 import AlgoVisualizationContent from './AlgoVisualizationContent';
 import PaperTradeContent from './PaperTradeContent';
-import BacktestContent from './BacktestContent';
 import MarketReplayContent from './MarketReplayContent';
 import ChartContent from './ChartContent';
 import ChartModal from './ChartModal';
@@ -268,8 +267,6 @@ const Dashboard: React.FC = () => {
         return <AlgoVisualizationContent />;
       case 'paper-trade':
         return <PaperTradeContent />;
-      case 'backtest':
-        return <BacktestContent />;
       case 'market-replay':
         return <MarketReplayContent />;
       case 'chat':

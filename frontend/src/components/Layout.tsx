@@ -65,10 +65,6 @@ const Layout: React.FC<LayoutProps> = ({ children, navigation }) => {
                   </a>
                 </li>
                 <li className="mb-2">
-                  <span className="text-white-50 small">Backtest</span>
-                  <span className="text-white-50 small ms-1">(Login Required)</span>
-                </li>
-                <li className="mb-2">
                   <span className="text-white-50 small">Market Replay</span>
                   <span className="text-white-50 small ms-1">(Login Required)</span>
                 </li>
