@@ -99,6 +99,23 @@ def log_request():
     if request.path.startswith('/api/rl'):
         logging.info(f"[RL] Incoming request: {request.method} {request.path}")
 
+@app.after_request
+def add_cors_headers(response):
+    """Ensure CORS headers include the request origin when credentials are used."""
+    try:
+        allowed_origins = config.CORS_ORIGINS if isinstance(config.CORS_ORIGINS, (list, tuple)) else [config.CORS_ORIGINS]
+        origin = request.headers.get('Origin')
+        if origin and origin in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        elif allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = allowed_origins[0]
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    except Exception as cors_err:
+        logging.debug(f"CORS header injection failed: {cors_err}")
+    return response
+
 @app.errorhandler(404)
 def not_found(error):
     """Handle 404 errors with JSON response for API routes"""
@@ -3555,9 +3572,6 @@ def api_rl_train():
     # Handle CORS preflight
     if request.method == 'OPTIONS':
         response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
         return response
     
     # Allow GET for testing
@@ -3614,7 +3628,8 @@ def api_rl_train():
         
         # Train RL agent
         model_dir = os.path.join(os.path.dirname(__file__), 'models')
-        logging.info(f"[RL] Starting RL training on {len(all_candles)} candles...")
+        logging.info(f"[RL] Starting RL training on {len(all_candles)} candles with episodes={episodes}, epsilon={epsilon}, epsilon_decay={epsilon_decay}...")
+        training_start_time = datetime.datetime.now()
         result = train_rl_agent(
             candles=all_candles,
             symbol=symbol,
@@ -3623,7 +3638,8 @@ def api_rl_train():
             epsilon=epsilon,
             epsilon_decay=epsilon_decay,
         )
-        logging.info(f"[RL] Training complete. Model saved to {result.get('model_path')}")
+        duration = (datetime.datetime.now() - training_start_time).total_seconds()
+        logging.info(f"[RL] Training complete in {duration:.2f}s. Model saved to {result.get('model_path')}")
         return jsonify({'status': 'ok', 'symbol': symbol, **result})
     except Exception as e:
         logging.error(f"Error in api_rl_train: {e}", exc_info=True)

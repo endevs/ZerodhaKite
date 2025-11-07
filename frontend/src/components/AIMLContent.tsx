@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea } from 'recharts';
 
 interface AIMLContentProps {}
@@ -467,9 +467,12 @@ const TrainModelPanel: React.FC = () => {
   const [episodes, setEpisodes] = useState<number>(100);
   const [epsilon, setEpsilon] = useState<number>(1.0);
   const [epsilonDecay, setEpsilonDecay] = useState<number>(0.995);
+  const [rlStrategy, setRlStrategy] = useState<string>('');
   const [rlLoading, setRlLoading] = useState<boolean>(false);
   const [rlTrainingInfo, setRlTrainingInfo] = useState<any>(null);
   const [rlEvaluationResults, setRlEvaluationResults] = useState<any>(null);
+  const [savedStrategies, setSavedStrategies] = useState<Array<{ id: string | number; strategy_name?: string; name?: string }>>([]);
+  const [strategiesLoading, setStrategiesLoading] = useState<boolean>(false);
 
   const trainModel = async () => {
     setLoading(true);
@@ -525,15 +528,20 @@ const TrainModelPanel: React.FC = () => {
   };
 
   const trainRL = async () => {
+    if (!rlStrategy) {
+      setError('Please select a strategy before training the RL agent.');
+      return;
+    }
     setError(null);
     setRlLoading(true);
     setRlTrainingInfo(null);
     setRlEvaluationResults(null);
     try {
-      const payload = { symbol: rlSymbol, years: rlYears, episodes, epsilon, epsilon_decay: epsilonDecay };
-      const res = await fetch('/api/rl/train', {
+      const payload = { symbol: rlSymbol, years: rlYears, episodes, epsilon, epsilon_decay: epsilonDecay, strategy: rlStrategy };
+      const res = await fetch('http://localhost:8000/api/rl/train', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       const ct = res.headers.get('content-type') || '';
@@ -553,7 +561,9 @@ const TrainModelPanel: React.FC = () => {
     setRlEvaluationResults(null);
     try {
       const params = new URLSearchParams({ symbol: rlSymbol, years: '0.5' });
-      const res = await fetch(`/api/rl/evaluate?${params.toString()}`);
+      const res = await fetch(`http://localhost:8000/api/rl/evaluate?${params.toString()}`, {
+        credentials: 'include',
+      });
       const ct = res.headers.get('content-type') || '';
       const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
       if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'RL evaluation failed');
@@ -564,6 +574,28 @@ const TrainModelPanel: React.FC = () => {
       setRlLoading(false);
     }
   };
+
+  useEffect(() => {
+    const fetchSavedStrategies = async () => {
+      setStrategiesLoading(true);
+      try {
+        const res = await fetch('http://localhost:8000/api/strategies', { credentials: 'include' });
+        const ct = res.headers.get('content-type') || '';
+        const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
+        if (res.ok && data.status === 'success') {
+          setSavedStrategies(data.strategies || []);
+        } else {
+          setSavedStrategies([]);
+        }
+      } catch (err) {
+        setSavedStrategies([]);
+      } finally {
+        setStrategiesLoading(false);
+      }
+    };
+
+    fetchSavedStrategies();
+  }, []);
 
   return (
     <>
@@ -673,7 +705,7 @@ const TrainModelPanel: React.FC = () => {
         <div className="card-header bg-success text-white">
           <h6 className="mb-0">
             <i className="bi bi-robot me-2"></i>
-            Reinforcement Learning - Mountain Signal Strategy
+            Reinforcement Learning
           </h6>
         </div>
         <div className="card-body">
@@ -683,6 +715,20 @@ const TrainModelPanel: React.FC = () => {
           </div>
 
           <div className="row g-3 align-items-end mb-3">
+            <div className="col-md-3">
+              <label className="form-label">Strategy</label>
+              <select className="form-select" value={rlStrategy} onChange={(e) => setRlStrategy(e.target.value)} disabled={strategiesLoading}>
+                <option value="">-- Select Strategy --</option>
+                {savedStrategies.map((s) => (
+                  <option key={s.id} value={String(s.id)}>
+                    {s.strategy_name || s.name || `Strategy ${s.id}`}
+                  </option>
+                ))}
+              </select>
+              {(!strategiesLoading && savedStrategies.length === 0) && (
+                <small className="text-muted">No saved strategies found.</small>
+              )}
+            </div>
             <div className="col-md-3">
               <label className="form-label">Symbol</label>
               <select className="form-select" value={rlSymbol} onChange={(e) => setRlSymbol(e.target.value as any)}>
