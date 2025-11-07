@@ -1,4 +1,5 @@
 from flask import Flask, request, redirect, render_template, jsonify, session, flash
+import os
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from kiteconnect import KiteConnect
@@ -20,9 +21,31 @@ import config
 from database import get_db_connection
 from chat import chat_bp
 from utils.backtest_metrics import calculate_all_metrics
+from ai_ml import train_lstm_on_candles, load_model_and_predict
+from ai_ml import candles_to_dataframe, prepare_training_data
+try:
+    from rl_trading import train_rl_agent, evaluate_rl_agent
+    RL_AVAILABLE = True
+    logging.info("[RL] RL module loaded successfully")
+except ImportError as e:
+    logging.warning(f"RL module not available: {e}")
+    RL_AVAILABLE = False
+    # Create dummy functions to prevent errors
+    def train_rl_agent(*args, **kwargs):
+        raise RuntimeError("RL module not available. Install TensorFlow.")
+    def evaluate_rl_agent(*args, **kwargs):
+        raise RuntimeError("RL module not available. Install TensorFlow.")
+import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+# Reduce noisy werkzeug/socket logs (but keep ERROR level for debugging)
+try:
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Changed from ERROR to WARNING to see 404s
+    logging.getLogger('engineio').setLevel(logging.WARNING)
+    logging.getLogger('socketio').setLevel(logging.WARNING)
+except Exception:
+    pass
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -68,6 +91,12 @@ scheduler.start()
 @app.before_request
 def make_session_permanent():
     session.permanent = False
+
+@app.before_request
+def log_request():
+    """Log incoming requests for debugging"""
+    if request.path.startswith('/api/rl'):
+        logging.info(f"[RL] Incoming request: {request.method} {request.path}")
 
 @app.errorhandler(404)
 def not_found(error):
@@ -2987,13 +3016,618 @@ def handle_subscribe_market_data(data):
     except Exception:
         return True
 
+# ========================= AI/ML: LSTM Training & Prediction =========================
+@app.route('/api/aiml/train', methods=['POST'])
+def api_aiml_train():
+    try:
+        data = request.get_json(force=True) if request.is_json else request.form
+        symbol = (data.get('symbol') or 'NIFTY').upper()
+        years = int(data.get('years', 2))
+        horizon = int(data.get('horizon', 1))  # 1-6
+        lookback = int(data.get('lookback', 60))
+        epochs = int(data.get('epochs', 20))
+        batch_size = int(data.get('batch_size', 64))
+
+        if horizon < 1 or horizon > 6:
+            return jsonify({'status': 'error', 'message': 'horizon must be between 1 and 6'}), 400
+
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=365 * years)
+        all_candles = []
+        current_date = start_date
+        interval = '5minute'
+        total_days = (end_date - start_date).days + 1
+        day_index = 0
+        logging.info(f"[AIML] Training request: symbol={symbol}, years={years}, horizon={horizon}, lookback={lookback}, epochs={epochs}, batch_size={batch_size}")
+        while current_date <= end_date:
+            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+            day_index += 1
+            if day_index % 20 == 0 or current_date > end_date:
+                logging.info(f"[AIML] Fetch progress: {day_index}/{total_days} trading days processed, candles so far: {len(all_candles)}")
+
+        if not all_candles:
+            return jsonify({'status': 'error', 'message': 'No historical data fetched for training'}), 404
+
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        logging.info(f"[AIML] Starting LSTM training on {len(all_candles)} candles ...")
+        result = train_lstm_on_candles(
+            candles=all_candles,
+            model_dir=model_dir,
+            symbol=symbol,
+            lookback=lookback,
+            horizon=horizon,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+        logging.info(f"[AIML] Training complete. Model saved to {result.get('model_path')}")
+        return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, **result})
+    except Exception as e:
+        logging.error(f"Error in api_aiml_train: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/aiml/predict', methods=['GET'])
+def api_aiml_predict():
+    try:
+        symbol = (request.args.get('symbol') or 'NIFTY').upper()
+        horizon = int(request.args.get('horizon', 1))
+        steps = int(request.args.get('steps', 6))
+        lookback = int(request.args.get('lookback', 60))
+        if horizon < 1 or horizon > 6:
+            return jsonify({'status': 'error', 'message': 'horizon must be between 1 and 6'}), 400
+        if steps < 1 or steps > 6:
+            steps = 6
+
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=7)
+        all_candles = []
+        current_date = start_date
+        interval = '5minute'
+        while current_date <= end_date and len(all_candles) < (lookback + 50):
+            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+
+        if len(all_candles) < lookback:
+            return jsonify({'status': 'error', 'message': 'Not enough recent candles for prediction'}), 400
+
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        result = load_model_and_predict(
+            model_dir=model_dir,
+            symbol=symbol,
+            candles=all_candles,
+            horizon=horizon,
+            lookback=lookback,
+            steps_ahead=steps,
+        )
+        return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, **result})
+    except Exception as e:
+        logging.error(f"Error in api_aiml_predict: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# Full-series evaluation for overlay chart (3 years by default)
+@app.route('/api/aiml/evaluate', methods=['GET'])
+def api_aiml_evaluate():
+    try:
+        symbol = (request.args.get('symbol') or 'NIFTY').upper()
+        years = int(request.args.get('years', 3))
+        horizon = int(request.args.get('horizon', 1))
+        lookback = int(request.args.get('lookback', 60))
+        if horizon < 1 or horizon > 6:
+            return jsonify({'status': 'error', 'message': 'horizon must be between 1 and 6'}), 400
+
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=365 * years)
+        all_candles = []
+        current_date = start_date
+        interval = '5minute'
+        total_days = (end_date - start_date).days + 1
+        processed = 0
+        while current_date <= end_date:
+            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+            processed += 1
+            if processed % 40 == 0 or current_date > end_date:
+                logging.info(f"[AIML] Evaluate fetch progress: {processed}/{total_days} days, candles: {len(all_candles)}")
+
+        if len(all_candles) < (lookback + 100):
+            return jsonify({'status': 'error', 'message': 'Insufficient candles for evaluation'}), 400
+
+        # Prepare features and scaling consistent with training
+        df = candles_to_dataframe(all_candles)
+        scaler, scaled = prepare_training_data(df, lookback)
+
+        # Load model (supports .keras preferred or .h5 fallback)
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        try:
+            model_result = load_model_and_predict(
+                model_dir=model_dir,
+                symbol=symbol,
+                candles=all_candles[-max(len(all_candles), lookback+1):],
+                horizon=horizon,
+                lookback=lookback,
+                steps_ahead=1,
+            )
+        except Exception:
+            # If model not found or incompatible, train a quick model on full data (lower epochs to keep responsive)
+            logging.info("[AIML] Model unavailable for evaluation; training a quick model for overlay...")
+            _ = train_lstm_on_candles(
+                candles=all_candles,
+                model_dir=model_dir,
+                symbol=symbol,
+                lookback=lookback,
+                horizon=horizon,
+                epochs=10,
+                batch_size=128,
+            )
+
+        # Build sequences across full dataset
+        # Target aligns at t = i + lookback + horizon - 1
+        feature_dim = scaled.shape[1]
+        X_all = []
+        y_all = []
+        times = []
+        total = scaled.shape[0]
+        end_idx = total - lookback - horizon + 1
+        for i in range(end_idx):
+            X_all.append(scaled[i:i+lookback, :])
+            y_all.append(scaled[i + lookback + horizon - 1, 0])
+            times.append(df.index[i + lookback + horizon - 1].isoformat())
+        X_all = np.array(X_all)
+        y_all = np.array(y_all)
+
+        # Load model again for prediction after possible quick-train
+        result_for_load = load_model_and_predict(
+            model_dir=model_dir,
+            symbol=symbol,
+            candles=all_candles[-(lookback+200):],
+            horizon=horizon,
+            lookback=lookback,
+            steps_ahead=1,
+        )
+        # We only need the model object; reuse the internal loader by calling it directly is not exposed.
+        # So we re-open via keras here for batch predict
+        from tensorflow.keras.models import load_model as keras_load_model
+        model_path_keras = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.keras")
+        model_path_h5 = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.h5")
+        if os.path.exists(model_path_keras):
+            model = keras_load_model(model_path_keras)
+        elif os.path.exists(model_path_h5):
+            try:
+                model = keras_load_model(model_path_h5, compile=False)
+                model.compile(optimizer="adam", loss="mse")
+            except Exception:
+                model = keras_load_model(model_path_h5)
+        else:
+            return jsonify({'status': 'error', 'message': 'Model not found after training'}), 500
+
+        # Predict across full series (single-step horizon per window)
+        y_pred_scaled = model.predict(X_all, verbose=0).reshape(-1)
+
+        # Inverse-transform to prices
+        last_row_template = np.zeros((feature_dim,))
+        inv_actual = []
+        inv_pred = []
+        for a, p in zip(y_all, y_pred_scaled):
+            row_a = last_row_template.copy(); row_a[0] = a
+            row_p = last_row_template.copy(); row_p[0] = p
+            inv_actual.append(float(scaler.inverse_transform(row_a.reshape(1,-1))[0][0]))
+            inv_pred.append(float(scaler.inverse_transform(row_p.reshape(1,-1))[0][0]))
+
+        # 70/30 split on sequence count
+        split_index = int(0.7 * len(times))
+        series = []
+        for i in range(len(times)):
+            series.append({
+                'time': times[i],
+                'actual': inv_actual[i],
+                'predicted': inv_pred[i],
+                'subset': 'train' if i < split_index else 'test'
+            })
+
+        return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, 'lookback': lookback, 'split_index': split_index, 'series': series})
+    except Exception as e:
+        logging.error(f"Error in api_aiml_evaluate: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+# Backward-compatible aliases without /api prefix
+@app.route('/aiml/train', methods=['POST'])
+def api_aiml_train_compat():
+    return api_aiml_train()
+
+
+@app.route('/aiml/predict', methods=['GET'])
+def api_aiml_predict_compat():
+    return api_aiml_predict()
+
+
+@app.route('/aiml/evaluate', methods=['GET'])
+def api_aiml_evaluate_compat():
+    return api_aiml_evaluate()
+
+
+@app.route('/api/aiml/evaluate_date', methods=['GET'])
+def api_aiml_evaluate_date():
+    """Evaluate actual vs predicted for a specific date (single day's 5-minute candles)"""
+    try:
+        symbol = (request.args.get('symbol') or 'NIFTY').upper()
+        date_str = request.args.get('date')  # Format: YYYY-MM-DD
+        horizon = int(request.args.get('horizon', 1))
+        lookback = int(request.args.get('lookback', 60))
+        
+        if not date_str:
+            return jsonify({'status': 'error', 'message': 'Date parameter required (YYYY-MM-DD)'}), 400
+        if horizon < 1 or horizon > 6:
+            return jsonify({'status': 'error', 'message': 'horizon must be between 1 and 6'}), 400
+
+        try:
+            target_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+
+        # Fetch data for the target date and enough prior days for lookback
+        start_dt = datetime.datetime.combine(target_date, datetime.time(9, 15))
+        end_dt = datetime.datetime.combine(target_date, datetime.time(15, 30))
+        interval = '5minute'
+        
+        # Fetch target date candles
+        target_candles = []
+        try:
+            hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            if hist:
+                target_candles.extend(hist)
+        except Exception as e:
+            logging.warning(f"Historical fetch failed for {target_date}: {e}")
+        
+        if len(target_candles) < 10:
+            return jsonify({'status': 'error', 'message': f'Insufficient data for {target_date}. Market may be closed.'}), 400
+
+        # Fetch prior days for lookback context (need at least lookback candles before target date)
+        prior_days = max(7, (lookback // 75) + 2)  # Estimate: ~75 candles per day
+        all_candles = []
+        current_date = target_date - datetime.timedelta(days=prior_days)
+        while current_date <= target_date:
+            start_d = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_d = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_d, end_d, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+
+        if len(all_candles) < (lookback + 10):
+            return jsonify({'status': 'error', 'message': 'Insufficient historical data for lookback'}), 400
+
+        # Prepare features
+        df = candles_to_dataframe(all_candles)
+        scaler, scaled = prepare_training_data(df, lookback)
+
+        # Load or train model
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        try:
+            _ = load_model_and_predict(
+                model_dir=model_dir,
+                symbol=symbol,
+                candles=all_candles[-max(len(all_candles), lookback+1):],
+                horizon=horizon,
+                lookback=lookback,
+                steps_ahead=1,
+            )
+        except Exception:
+            logging.info("[AIML] Model unavailable for date evaluation; training quick model...")
+            _ = train_lstm_on_candles(
+                candles=all_candles,
+                model_dir=model_dir,
+                symbol=symbol,
+                lookback=lookback,
+                horizon=horizon,
+                epochs=10,
+                batch_size=128,
+            )
+
+        # Load model for prediction
+        from tensorflow.keras.models import load_model as keras_load_model
+        model_path_keras = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.keras")
+        model_path_h5 = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.h5")
+        if os.path.exists(model_path_keras):
+            model = keras_load_model(model_path_keras)
+        elif os.path.exists(model_path_h5):
+            try:
+                model = keras_load_model(model_path_h5, compile=False)
+                model.compile(optimizer="adam", loss="mse")
+            except Exception:
+                model = keras_load_model(model_path_h5)
+        else:
+            return jsonify({'status': 'error', 'message': 'Model not found'}), 500
+
+        # Filter to target date only
+        df_target = df[df.index.date == target_date].copy()
+        if len(df_target) == 0:
+            return jsonify({'status': 'error', 'message': f'No data found for {target_date}'}), 400
+
+        # Find indices in full dataset for target date
+        target_start_idx = df.index.get_indexer([df_target.index[0]], method='nearest')[0]
+        if target_start_idx < lookback:
+            return jsonify({'status': 'error', 'message': 'Insufficient prior data for lookback'}), 400
+
+        # Build sequences for target date only
+        series = []
+        feature_dim = scaled.shape[1]
+        for i in range(target_start_idx, min(target_start_idx + len(df_target) - horizon + 1, len(scaled) - horizon + 1)):
+            if i < lookback:
+                continue
+            X_seq = scaled[i-lookback:i, :].reshape(1, lookback, feature_dim)
+            y_actual_scaled = scaled[i + horizon - 1, 0]
+            y_pred_scaled = float(model.predict(X_seq, verbose=0)[0][0])
+            
+            # Inverse transform
+            row_a = np.zeros((feature_dim,)); row_a[0] = y_actual_scaled
+            row_p = np.zeros((feature_dim,)); row_p[0] = y_pred_scaled
+            actual_price = float(scaler.inverse_transform(row_a.reshape(1,-1))[0][0])
+            pred_price = float(scaler.inverse_transform(row_p.reshape(1,-1))[0][0])
+            
+            # Format time as HH:MM (datetimes are already in IST after candles_to_dataframe conversion)
+            dt = df.index[i + horizon - 1]
+            # Datetime should already be IST (naive) from candles_to_dataframe
+            time_str = dt.strftime('%H:%M')
+            
+            series.append({
+                'time': time_str,
+                'timeFull': dt.isoformat() if hasattr(dt, 'isoformat') else str(dt),
+                'actual': actual_price,
+                'predicted': pred_price,
+            })
+
+        return jsonify({
+            'status': 'ok',
+            'symbol': symbol,
+            'date': date_str,
+            'horizon': horizon,
+            'series': series
+        })
+    except Exception as e:
+        logging.error(f"Error in api_aiml_evaluate_date: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/aiml/evaluate_date', methods=['GET'])
+def api_aiml_evaluate_date_compat():
+    return api_aiml_evaluate_date()
+
+
+# ========================= Reinforcement Learning =========================
+@app.route('/api/rl/status', methods=['GET'])
+def api_rl_status():
+    """Check RL module availability"""
+    # List all RL routes for debugging
+    rl_routes = [str(rule) for rule in app.url_map.iter_rules() if 'rl' in str(rule)]
+    return jsonify({
+        'status': 'ok',
+        'rl_available': RL_AVAILABLE,
+        'message': 'RL module available' if RL_AVAILABLE else 'RL module not available. TensorFlow required.',
+        'registered_routes': rl_routes
+    })
+
+@app.route('/api/rl/train', methods=['GET', 'POST', 'OPTIONS'])
+def api_rl_train():
+    """Train RL agent on historical data"""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response
+    
+    # Allow GET for testing
+    if request.method == 'GET':
+        return jsonify({
+            'status': 'ok',
+            'message': 'RL train endpoint is accessible. Use POST to train.',
+            'rl_available': RL_AVAILABLE
+        })
+    
+    logging.info(f"[RL] Train endpoint called, RL_AVAILABLE={RL_AVAILABLE}, method={request.method}, path={request.path}")
+    if not RL_AVAILABLE:
+        return jsonify({'status': 'error', 'message': 'RL module not available. TensorFlow required.'}), 503
+    try:
+        data = request.get_json(force=True) if request.is_json else request.form
+        symbol = (data.get('symbol') or 'BANKNIFTY').upper()
+        years = int(data.get('years', 3))
+        episodes = int(data.get('episodes', 100))
+        epsilon = float(data.get('epsilon', 1.0))
+        epsilon_decay = float(data.get('epsilon_decay', 0.995))
+        
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+        
+        # Fetch 3 years of 5-minute data
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=365 * years)
+        all_candles = []
+        current_date = start_date
+        interval = '5minute'
+        total_days = (end_date - start_date).days + 1
+        day_index = 0
+        
+        logging.info(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}")
+        
+        while current_date <= end_date:
+            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+            day_index += 1
+            if day_index % 50 == 0 or current_date > end_date:
+                logging.info(f"[RL] Fetch progress: {day_index}/{total_days} days, candles: {len(all_candles)}")
+        
+        if len(all_candles) < 1000:
+            return jsonify({'status': 'error', 'message': 'Insufficient data for RL training'}), 400
+        
+        # Train RL agent
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        logging.info(f"[RL] Starting RL training on {len(all_candles)} candles...")
+        result = train_rl_agent(
+            candles=all_candles,
+            symbol=symbol,
+            model_dir=model_dir,
+            episodes=episodes,
+            epsilon=epsilon,
+            epsilon_decay=epsilon_decay,
+        )
+        logging.info(f"[RL] Training complete. Model saved to {result.get('model_path')}")
+        return jsonify({'status': 'ok', 'symbol': symbol, **result})
+    except Exception as e:
+        logging.error(f"Error in api_rl_train: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/rl/evaluate', methods=['GET'])
+def api_rl_evaluate():
+    """Evaluate trained RL agent on test data"""
+    if not RL_AVAILABLE:
+        return jsonify({'status': 'error', 'message': 'RL module not available. TensorFlow required.'}), 503
+    try:
+        symbol = (request.args.get('symbol') or 'BANKNIFTY').upper()
+        years = float(request.args.get('years', 0.5))  # Last 6 months for evaluation
+        
+        token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+        if symbol not in token_map:
+            return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
+        instrument_token = token_map[symbol]
+        
+        # Fetch test data (last 6 months)
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=int(365 * years))
+        all_candles = []
+        current_date = start_date
+        interval = '5minute'
+        
+        while current_date <= end_date:
+            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            try:
+                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                if hist:
+                    all_candles.extend(hist)
+            except Exception as e:
+                logging.warning(f"Historical fetch failed for {current_date}: {e}")
+            current_date += datetime.timedelta(days=1)
+        
+        if len(all_candles) < 100:
+            return jsonify({'status': 'error', 'message': 'Insufficient test data'}), 400
+        
+        # Evaluate RL agent
+        model_dir = os.path.join(os.path.dirname(__file__), 'models')
+        result = evaluate_rl_agent(
+            candles=all_candles,
+            symbol=symbol,
+            model_dir=model_dir,
+        )
+        return jsonify({'status': 'ok', 'symbol': symbol, **result})
+    except Exception as e:
+        logging.error(f"Error in api_rl_evaluate: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/aiml/rl/train', methods=['POST'])
+def api_rl_train_compat():
+    return api_rl_train()
+
+
+@app.route('/aiml/rl/evaluate', methods=['GET'])
+def api_rl_evaluate_compat():
+    return api_rl_evaluate()
+
+
+@app.route('/aiml/rl/status', methods=['GET'])
+def api_rl_status_compat():
+    return api_rl_status()
+
+
 app.register_blueprint(chat_bp)
 
+# Log all registered routes on startup (for debugging)
+def log_routes():
+    """Log all registered routes for debugging"""
+    try:
+        routes = []
+        for rule in app.url_map.iter_rules():
+            routes.append(f"{', '.join(rule.methods)} {rule.rule}")
+        logging.info(f"Registered {len(routes)} routes")
+        rl_routes = [r for r in routes if 'rl' in r.lower()]
+        if rl_routes:
+            logging.info(f"RL routes: {rl_routes}")
+    except Exception as e:
+        logging.warning(f"Could not log routes: {e}")
+
+# Log routes after all blueprints are registered
+log_routes()
+
 if __name__ == "__main__":
-    socketio.run(
-        app,
-        debug=config.DEBUG,
-        host=config.SERVER_HOST,
-        port=config.SERVER_PORT,
-        allow_unsafe_werkzeug=True
-    )
+    logging.info("=" * 60)
+    logging.info(f"Starting Flask server on {config.SERVER_HOST}:{config.SERVER_PORT}")
+    logging.info(f"Debug mode: {config.DEBUG}")
+    logging.info(f"RL module available: {RL_AVAILABLE}")
+    logging.info("=" * 60)
+    try:
+        socketio.run(
+            app,
+            debug=config.DEBUG,
+            host=config.SERVER_HOST,
+            port=config.SERVER_PORT,
+            allow_unsafe_werkzeug=True
+        )
+    except Exception as e:
+        logging.error(f"Failed to start server: {e}", exc_info=True)
+        raise

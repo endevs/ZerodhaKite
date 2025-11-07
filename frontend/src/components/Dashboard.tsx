@@ -61,16 +61,13 @@ const Dashboard: React.FC = () => {
           
           // If access token was just set (user just logged in), request ticker startup via HTTP
           if (hasAccessToken) {
-            console.log('Access token detected - requesting ticker startup via HTTP...');
             fetch('http://localhost:8000/api/ticker/start', {
               method: 'POST',
               credentials: 'include'
             })
               .then(response => response.json())
               .then(result => {
-                if (result.status === 'success') {
-                  console.log('Ticker started successfully:', result.message);
-                } else {
+                if (result.status !== 'success') {
                   console.error('Failed to start ticker:', result.message);
                 }
               })
@@ -127,22 +124,19 @@ const Dashboard: React.FC = () => {
         .then(response => response.json())
         .then(data => {
           if (data.access_token_present) {
-            console.log('Requesting ticker startup via HTTP endpoint...');
             fetch('http://localhost:8000/api/ticker/start', {
               method: 'POST',
               credentials: 'include'
             })
               .then(response => response.json())
               .then(result => {
-                if (result.status === 'success') {
-                  console.log('Ticker started successfully:', result.message);
-                } else {
+                if (result.status !== 'success') {
                   console.error('Failed to start ticker:', result.message);
                 }
               })
               .catch(err => console.error('Error starting ticker:', err));
           } else {
-            console.log('No access token found - user not logged in or Zerodha not connected');
+            // silent
           }
         })
         .catch(err => console.error('Error checking access token:', err));
@@ -206,11 +200,7 @@ const Dashboard: React.FC = () => {
     });
 
     socket.on('info', (msg: { message: string }) => {
-      console.log('SocketIO info:', msg.message);
-      if (msg.message.includes('Market data feed started') || msg.message.includes('Ticker is already running')) {
-        // Ticker started successfully, market data should start flowing
-        console.log('Ticker started - waiting for market data...');
-      }
+      // Reduce console noise; keep only warnings/errors elsewhere
     });
 
     socket.on('error', (msg: { message: string }) => {

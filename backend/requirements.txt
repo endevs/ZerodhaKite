@@ -5,3 +5,6 @@ APScheduler
 flask-cors
 pandas
 python-dotenv
+numpy
+scikit-learn
+tensorflow

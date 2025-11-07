@@ -54,6 +54,18 @@ interface IgnoredSignal {
   rsiValue: number | null;
 }
 
+interface WaitingSignal {
+  index: number;
+  signalTime: string;
+  signalType: 'PE' | 'CE';
+  signalHigh: number;
+  signalLow: number;
+  breakLevel: number;
+  currentClose: number;
+  rsiValue: number | null;
+  emaValue: number;
+}
+
 interface MountainSignalChartProps {
   strategy: Strategy;
   activeTab?: 'chart' | 'backtest';
@@ -64,65 +76,13 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [chartData, setChartData] = useState<ChartDataResponse>({ candles: [], ema5: [] });
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const [containerDimensions, setContainerDimensions] = useState<{ width: number; height: number } | null>(null);
-  
-  // Use callback ref to attach container to ref
-  const containerRefCallback = useCallback((node: HTMLDivElement | null) => {
-    chartContainerRef.current = node;
-  }, []);
-  
-  // Use ResizeObserver to detect when container has dimensions
-  useEffect(() => {
-    if (!chartContainerRef.current || chartData.candles.length === 0) {
-      setContainerDimensions(null);
-      return;
-    }
-    
-    const node = chartContainerRef.current;
-    let resizeObserver: ResizeObserver | null = null;
-    
-    // Use ResizeObserver to detect when container has dimensions
-    resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          setContainerDimensions({ width, height });
-        }
-      }
-    });
-    
-    resizeObserver.observe(node);
-    
-    // Also check immediately in case ResizeObserver doesn't fire
-    const checkDimensions = () => {
-      const rect = node.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        setContainerDimensions({ width: rect.width, height: rect.height });
-      } else {
-        // Retry after a short delay
-        setTimeout(checkDimensions, 50);
-      }
-    };
-    
-    // Use requestAnimationFrame to ensure DOM is fully laid out
-    requestAnimationFrame(() => {
-      checkDimensions();
-    });
-    
-    // Cleanup
-    return () => {
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-      }
-    };
-  }, [chartData.candles.length]); // Re-run when chart data changes
   const [signalCandles, setSignalCandles] = useState<SignalCandle[]>([]);
   const [tradeEvents, setTradeEvents] = useState<TradeEvent[]>([]);
   const [peBreakLevel, setPeBreakLevel] = useState<number | null>(null);
   const [ceBreakLevel, setCeBreakLevel] = useState<number | null>(null);
   const [chartType, setChartType] = useState<'candlestick' | 'line'>('line');
   const [ignoredSignals, setIgnoredSignals] = useState<IgnoredSignal[]>([]);
+  const [waitingSignals, setWaitingSignals] = useState<WaitingSignal[]>([]);
   const [tradeHistory, setTradeHistory] = useState<Array<{
     signalIndex: number;
     signalTime: string;
@@ -146,7 +106,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [filterPE, setFilterPE] = useState<boolean>(true);
-  const [filterCE, setFilterCE] = useState<boolean>(true);
+  const [filterCE, setFilterCE] = useState<boolean>(false);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [backtestResults, setBacktestResults] = useState<{
     trades: Array<{
@@ -233,6 +193,27 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   }, [selectedDate, fetchChartData]);
 
   const processMountainSignalLogic = (data: ChartDataResponse) => {
+    /**
+     * SIGNAL EVALUATION TIMING: 20 Seconds Before Candle Close
+     * 
+     * LIVE TRADING (Backend):
+     * - Signals are evaluated 20 seconds BEFORE each 5-minute candle closes
+     * - For example, for a 10:30-10:35 candle, evaluation happens at 10:34:40
+     * - At this time, the candle is 99% complete (4 min 40 sec out of 5 min)
+     * - This gives earlier signal detection for faster trade entries
+     * 
+     * HISTORICAL VISUALIZATION (Frontend/This Code):
+     * - We process COMPLETED candles with full OHLC data
+     * - Signal evaluation happens after candle close (retrospective view)
+     * - This shows what signals WOULD have been detected in real-time
+     * - The logic matches the backend but operates on completed candles
+     * 
+     * WHY 20 SECONDS BEFORE?
+     * - Gets 99% complete candle data (very accurate)
+     * - Allows earlier trade entries (20 seconds sooner)
+     * - Mimics real-world trading where you watch forming candles
+     * - Reduces lag between signal detection and entry execution
+     */
     const candles = data.candles;
     const ema5Values = data.ema5.map(e => e.y).filter(v => v !== null && v !== undefined) as number[];
     const rsi14Values = data.rsi14 ? data.rsi14.map(e => e.y).filter(v => v !== null && v !== undefined) as number[] : [];
@@ -244,6 +225,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     const signals: SignalCandle[] = [];
     const trades: TradeEvent[] = [];
     const ignored: IgnoredSignal[] = [];
+    const waiting: WaitingSignal[] = [];
+    // Track latest waiting signal per type to avoid duplicates
+    let latestPeWaiting: WaitingSignal | null = null;
+    let latestCeWaiting: WaitingSignal | null = null;
     let currentPeSignal: SignalCandle | null = null;
     let currentCeSignal: SignalCandle | null = null;
     let activeTradeEvent: TradeEvent | null = null;
@@ -269,6 +254,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       // Get RSI value for current candle (for signal identification only)
       const currentRsi = rsi14Values.length > i ? rsi14Values[i] : null;
 
+      // --- SIGNAL CANDLE IDENTIFICATION ---
+      // NOTE: In live trading, this evaluation happens 20 seconds before candle close
+      // Here we use completed candle data for historical visualization
+      
       // PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70
       if (candleLow > ema5) {
         // RSI condition must be met at signal identification time
@@ -414,6 +403,23 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           setPeBreakLevel(currentPeSignal.low);
           // Reset price action validation after entry (for next exit/entry cycle)
           peSignalPriceAboveLow = false;
+        } else if (currentPeSignal && !activeTradeEvent) {
+          // Signal exists but entry condition not met yet - track as waiting
+          // Only track if no active trade and entry not blocked
+          if (peEntryAllowed) {
+            // Update latest waiting signal (replaces previous waiting states for same signal type)
+            latestPeWaiting = {
+              index: i,
+              signalTime: currentPeSignal.time,
+              signalType: 'PE',
+              signalHigh: currentPeSignal.high,
+              signalLow: currentPeSignal.low,
+              breakLevel: currentPeSignal.low,
+              currentClose: candleClose,
+              rsiValue: currentRsi,
+              emaValue: ema5
+            };
+          }
         }
         // CE Entry: Next candle CLOSE > signal candle HIGH
         // For first entry: no price action validation needed
@@ -423,21 +429,38 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           const ceEntryAllowed = isFirstEntry || ceSignalPriceBelowHigh;
           
           if (currentCeSignal && candleClose > currentCeSignal.high && ceEntryAllowed) {
-          // Entry taken - signal candle already validated with RSI at identification time
-          // and price action requirement met
-          activeTradeEvent = {
-            index: i,
-            type: 'ENTRY',
-            tradeType: 'CE',
-            price: candleClose,
-            time: candle.x,
-            signalCandleIndex: currentCeSignal.index
-          };
+            // Entry taken - signal candle already validated with RSI at identification time
+            // and price action requirement met
+            activeTradeEvent = {
+              index: i,
+              type: 'ENTRY',
+              tradeType: 'CE',
+              price: candleClose,
+              time: candle.x,
+              signalCandleIndex: currentCeSignal.index
+            };
             trades.push(activeTradeEvent);
             signalCandlesWithEntry.add(currentCeSignal.index);
             setCeBreakLevel(currentCeSignal.high);
             // Reset price action validation after entry (for next exit/entry cycle)
             ceSignalPriceBelowHigh = false;
+          } else if (currentCeSignal && !activeTradeEvent) {
+            // Signal exists but entry condition not met yet - track as waiting
+            // Only track if no active trade and entry not blocked
+            if (ceEntryAllowed) {
+              // Update latest waiting signal (replaces previous waiting states for same signal type)
+              latestCeWaiting = {
+                index: i,
+                signalTime: currentCeSignal.time,
+                signalType: 'CE',
+                signalHigh: currentCeSignal.high,
+                signalLow: currentCeSignal.low,
+                breakLevel: currentCeSignal.high,
+                currentClose: candleClose,
+                rsiValue: currentRsi,
+                emaValue: ema5
+              };
+            }
           }
         }
       }
@@ -579,10 +602,15 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       }
     }
 
+    // Add latest waiting signals to the array (only if they exist)
+    if (latestPeWaiting) waiting.push(latestPeWaiting);
+    if (latestCeWaiting) waiting.push(latestCeWaiting);
+    
     // Update all state at once (React automatically batches these)
     setSignalCandles(signals);
     setTradeEvents(trades);
     setIgnoredSignals(ignored);
+    setWaitingSignals(waiting);
 
     // Build trade history for table
     const history: typeof tradeHistory = [];
@@ -667,8 +695,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     return chartData.candles.map((candle, index) => {
       const ema5Value = chartData.ema5?.[index]?.y ?? null;
       const rsi14Value = chartData.rsi14?.[index]?.y ?? null;
-      const signalCandle = signalCandles.find(s => s.index === index);
-      const tradeEvent = tradeEvents.find(t => t.index === index);
+      const signalCandle = signalCandles.find(s => s.index === index && ((s.type === 'PE' && filterPE) || (s.type === 'CE' && filterCE)));
+      const tradeEvent = tradeEvents.find(t => t.index === index && ((t.tradeType === 'PE' && filterPE) || (t.tradeType === 'CE' && filterCE)));
 
       return {
         time: new Date(candle.x),
@@ -686,22 +714,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         ohlc: [candle.o, candle.h, candle.l, candle.c]
       };
     });
-  }, [chartData, signalCandles, tradeEvents]);
-
-  // Handle window resize - update dimensions
-  useEffect(() => {
-    const handleResize = () => {
-      if (chartContainerRef.current) {
-        const rect = chartContainerRef.current.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          setContainerDimensions({ width: rect.width, height: rect.height });
-        }
-      }
-    };
-    
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [chartData, signalCandles, tradeEvents, filterPE, filterCE]);
 
   // Enhanced Custom Tooltip with full details
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -1414,7 +1427,20 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               </button>
             </div>
             <div className="col-md-3">
-              <div className="text-muted small">
+              <label className="form-label fw-bold">
+                <i className="bi bi-sliders me-2"></i>Include in Chart & P&L
+              </label>
+              <div className="d-flex gap-3">
+                <div className="form-check">
+                  <input className="form-check-input" type="checkbox" id="filter-pe-chart" checked={filterPE} onChange={(e) => setFilterPE(e.target.checked)} />
+                  <label className="form-check-label" htmlFor="filter-pe-chart">PE</label>
+                </div>
+                <div className="form-check">
+                  <input className="form-check-input" type="checkbox" id="filter-ce-chart" checked={filterCE} onChange={(e) => setFilterCE(e.target.checked)} />
+                  <label className="form-check-label" htmlFor="filter-ce-chart">CE</label>
+                </div>
+              </div>
+              <div className="text-muted small mt-2">
                 <strong>Strategy:</strong> {strategy.strategy_name}<br/>
                 <strong>Instrument:</strong> {strategy.instrument} | <strong>EMA:</strong> {emaPeriod}
               </div>
@@ -1441,12 +1467,12 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 </div>
                 <div className="col-md-3">
                   <small className="text-muted">
-                    Signals Found: <strong>{signalCandles.length}</strong>
+                    Signals Found: <strong>{signalCandles.filter(s => (s.type === 'PE' && filterPE) || (s.type === 'CE' && filterCE)).length}</strong>
                   </small>
                 </div>
                 <div className="col-md-3">
                   <small className="text-muted">
-                    Trades: <strong>{tradeEvents.filter(t => t.type === 'ENTRY').length}</strong>
+                    Trades: <strong>{tradeEvents.filter(t => t.type === 'ENTRY' && ((t.tradeType === 'PE' && filterPE) || (t.tradeType === 'CE' && filterCE))).length}</strong>
                   </small>
                 </div>
               </div>
@@ -1462,12 +1488,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               <i className="bi bi-bar-chart-fill me-2"></i>
               Mountain Signal Strategy Chart
             </h5>
-            <div 
-              ref={containerRefCallback}
-              style={{ width: '100%', height: '600px', minWidth: '100%', minHeight: '600px', position: 'relative', display: 'block' }}
-            >
-              {containerDimensions && chartDataFormatted.length > 0 ? (
-                <ResponsiveContainer width={containerDimensions.width} height={containerDimensions.height}>
+            <div style={{ width: '100%', height: '600px' }}>
+              <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
                   data={chartDataFormatted}
                   margin={{ top: 20, right: 30, left: 20, bottom: 60 }}
@@ -1587,8 +1609,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         name="Close Price"
                         connectNulls={false}
                       />
-                      {/* Entry markers on line */}
-                      {tradeEvents.filter(e => e.type === 'ENTRY').map((event, idx) => {
+                  {/* Entry markers on line */}
+                  {tradeEvents.filter(e => e.type === 'ENTRY' && ((e.tradeType === 'PE' && filterPE) || (e.tradeType === 'CE' && filterCE))).map((event, idx) => {
                         const candle = chartDataFormatted[event.index];
                         if (!candle) return null;
                         return (
@@ -1602,8 +1624,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                           />
                         );
                       })}
-                      {/* Exit markers on line */}
-                      {tradeEvents.filter(e => e.type === 'STOP_LOSS' || e.type === 'TARGET').map((event, idx) => {
+                  {/* Exit markers on line */}
+                  {tradeEvents.filter(e => (e.type === 'STOP_LOSS' || e.type === 'TARGET') && ((e.tradeType === 'PE' && filterPE) || (e.tradeType === 'CE' && filterCE))).map((event, idx) => {
                         const candle = chartDataFormatted[event.index];
                         if (!candle) return null;
                         return (
@@ -1620,12 +1642,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     </>
                   )}
                 </ComposedChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                  <div className="text-muted">Loading chart...</div>
-                </div>
-              )}
+              </ResponsiveContainer>
             </div>
           </div>
         </div>
@@ -1696,13 +1713,108 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         </div>
       )}
 
+      {/* Signals Identified - Waiting for Trade */}
+      {waitingSignals.length > 0 && (
+        <div className="card border-0 shadow-sm mt-3">
+          <div className="card-header bg-primary text-white">
+            <h5 className="card-title mb-0">
+              <i className="bi bi-clock-history me-2"></i>
+              Signals Identified - Waiting for Trade Entry
+            </h5>
+            <small className="text-white-50">
+              Valid signals identified but entry condition not yet triggered
+            </small>
+          </div>
+          <div className="card-body">
+            <div className="table-responsive">
+              <table className="table table-hover table-striped">
+                <thead className="table-primary">
+                  <tr>
+                    <th>#</th>
+                    <th>Signal Time</th>
+                    <th>Signal Type</th>
+                    <th>Signal High</th>
+                    <th>Signal Low</th>
+                    <th>Break Level</th>
+                    <th>Current Close</th>
+                    <th>Gap to Entry</th>
+                    <th>RSI</th>
+                    <th>EMA</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {waitingSignals.filter(s => (s.signalType === 'PE' && filterPE) || (s.signalType === 'CE' && filterCE)).map((signal, index) => {
+                    const gap = signal.signalType === 'PE' 
+                      ? signal.currentClose - signal.breakLevel 
+                      : signal.breakLevel - signal.currentClose;
+                    const gapPercent = (gap / signal.breakLevel) * 100;
+                    
+                    return (
+                      <tr key={index}>
+                        <td><strong>{index + 1}</strong></td>
+                        <td>{formatDateTime(signal.signalTime)}</td>
+                        <td>
+                          <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                            {signal.signalType}
+                          </span>
+                        </td>
+                        <td>{signal.signalHigh.toFixed(2)}</td>
+                        <td>{signal.signalLow.toFixed(2)}</td>
+                        <td>
+                          <strong className="text-primary">{signal.breakLevel.toFixed(2)}</strong>
+                        </td>
+                        <td>{signal.currentClose.toFixed(2)}</td>
+                        <td>
+                          <span className={gap > 0 ? 'text-warning' : 'text-success fw-bold'}>
+                            {gap > 0 ? '+' : ''}{gap.toFixed(2)} ({gapPercent.toFixed(2)}%)
+                          </span>
+                        </td>
+                        <td>
+                          {signal.rsiValue !== null ? (
+                            <span className={
+                              signal.signalType === 'PE' && signal.rsiValue > 70 ? 'text-success' : 
+                              signal.signalType === 'CE' && signal.rsiValue < 30 ? 'text-success' : 
+                              'text-muted'
+                            }>
+                              {signal.rsiValue.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-muted">N/A</span>
+                          )}
+                        </td>
+                        <td>{signal.emaValue.toFixed(2)}</td>
+                        <td>
+                          <span className="badge bg-info">
+                            {signal.signalType === 'PE' ? 'Waiting: Close < ' : 'Waiting: Close > '}
+                            {signal.breakLevel.toFixed(2)}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="alert alert-info mb-0 mt-2">
+              <i className="bi bi-info-circle me-2"></i>
+              <strong>Note:</strong> These signals meet all criteria (EMA + RSI) but are waiting for the entry trigger:
+              <ul className="mb-0 mt-2">
+                <li><strong>PE Signals:</strong> Waiting for next candle to close below {waitingSignals.filter(s => s.signalType === 'PE').length > 0 ? waitingSignals.filter(s => s.signalType === 'PE')[0]?.breakLevel.toFixed(2) : 'signal low'}</li>
+                <li><strong>CE Signals:</strong> Waiting for next candle to close above {waitingSignals.filter(s => s.signalType === 'CE').length > 0 ? waitingSignals.filter(s => s.signalType === 'CE')[0]?.breakLevel.toFixed(2) : 'signal high'}</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Trade History Table */}
       {tradeHistory.length > 0 && (
         <div className="card border-0 shadow-sm mt-3">
           <div className="card-header bg-info text-white">
             <h5 className="card-title mb-0">
               <i className="bi bi-table me-2"></i>
-              Trade History & P&L Analysis
+              Trade History & P&L Analysis {(!filterPE || !filterCE) && '(Filtered)'}
             </h5>
           </div>
           <div className="card-body">
@@ -1726,7 +1838,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                   </tr>
                 </thead>
                 <tbody>
-                  {tradeHistory.map((trade, index) => (
+                  {tradeHistory.filter(trade => (trade.signalType === 'PE' && filterPE) || (trade.signalType === 'CE' && filterCE)).map((trade, index) => (
                     <tr key={index}>
                       <td><strong>{index + 1}</strong></td>
                       <td>{formatDateTime(trade.signalTime)}</td>
@@ -1789,6 +1901,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     <td>
                       {(() => {
                         const totalPnL = tradeHistory
+                          .filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE))
                           .filter(t => t.pnl !== null)
                           .reduce((sum, t) => sum + (t.pnl || 0), 0);
                         return (
@@ -1801,6 +1914,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     <td>
                       {(() => {
                         const totalPnLPercent = tradeHistory
+                          .filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE))
                           .filter(t => t.pnlPercent !== null)
                           .reduce((sum, t) => sum + (t.pnlPercent || 0), 0);
                         return (

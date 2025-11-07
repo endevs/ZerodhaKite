@@ -97,6 +97,8 @@ class CaptureMountainSignal(BaseStrategy):
         self.ce_signal_price_below_high = False  # After exit, need price LOW < signal HIGH before next entry
         # Track which signal candles have already had an entry (to distinguish first entry vs re-entry)
         self.signal_candles_with_entry = set()  # Store signal candle indices that have had entries
+        # Track if signal evaluation has been done for current candle (to prevent duplicate evaluations)
+        self.signal_evaluated_for_current_candle = False
 
     def _aligned_execution_time(self, base_dt: datetime.datetime) -> datetime.datetime:
         """Return the aligned execution time at minute % 5 == 4 and second == 40 for the candle window.
@@ -473,6 +475,8 @@ class CaptureMountainSignal(BaseStrategy):
                 'volume': 0 # Volume not available in ticks, keep as 0 or estimate
             }
             self.historical_data.append(self.current_candle_data) # Add new candle to historical data
+            # Reset signal evaluation flag for new candle
+            self.signal_evaluated_for_current_candle = False
         else:
             # Update existing candle
             self.current_candle_data['high'] = max(self.current_candle_data['high'], current_ltp)
@@ -492,6 +496,20 @@ class CaptureMountainSignal(BaseStrategy):
         except Exception:
             pass
 
+        # **SIGNAL EVALUATION TIMING: 20 seconds before candle close**
+        # Calculate how many seconds we are from the candle end
+        candle_duration_seconds = candle_interval_minutes * 60
+        seconds_into_candle = (tick_datetime - current_candle_start_time).total_seconds()
+        seconds_before_close = candle_duration_seconds - seconds_into_candle
+        
+        # Evaluate signal 20 seconds before candle close (with 2-second buffer: 18-22 seconds)
+        # This gives us 99% complete candle data while still being before the official close
+        if 18 <= seconds_before_close <= 22:
+            if not self.signal_evaluated_for_current_candle and len(self.historical_data) > self.ema_period:
+                self._evaluate_signal_candle()
+                self.signal_evaluated_for_current_candle = True
+                logging.info(f"Signal evaluation triggered at {tick_datetime.strftime('%H:%M:%S')} ({seconds_before_close:.1f}s before candle close)")
+
         # Only run strategy logic if we have enough historical data for EMA calculation
         if len(self.historical_data) > self.ema_period:
             self._apply_strategy_logic()
@@ -501,7 +519,12 @@ class CaptureMountainSignal(BaseStrategy):
         # The main strategy logic will be applied here or in _apply_strategy_logic
         pass
 
-    def _apply_strategy_logic(self):
+    def _evaluate_signal_candle(self):
+        """
+        Evaluate signal candle conditions 20 seconds before candle close.
+        This method checks if the CURRENT (forming) candle meets signal criteria.
+        At 20 seconds before close, we have 99% complete candle data.
+        """
         df = pd.DataFrame(self.historical_data)
         df['ema'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
         
@@ -511,22 +534,20 @@ class CaptureMountainSignal(BaseStrategy):
         else:
             df['rsi14'] = None
 
-        # Ensure we have at least two candles for signal/entry logic
-        if len(df) < 2:
-            self.status['signal_status'] = 'Not enough candles for signal identification.'
+        # Ensure we have at least one candle
+        if len(df) < 1:
             return
 
+        # Use the CURRENT (last) candle for evaluation - it's still forming but 99% complete
         current_candle = df.iloc[-1]
-        previous_candle = df.iloc[-2]
         current_ema = current_candle['ema']
-        previous_ema = previous_candle['ema']
-        previous_rsi = df.iloc[-2]['rsi14'] if 'rsi14' in df.columns else None
+        current_rsi = current_candle['rsi14'] if 'rsi14' in df.columns and pd.notna(current_candle['rsi14']) else None
 
-        # --- Signal Identification and Reset ---
-        # PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70
-        if previous_candle['low'] > previous_ema:
+        # --- PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70 ---
+        # Note: We evaluate the forming candle at 20 seconds before close
+        if current_candle['low'] > current_ema:
             # RSI condition must be met at signal identification time
-            if previous_rsi is not None and previous_rsi > 70:
+            if current_rsi is not None and current_rsi > 70:
                 # Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > 70), 
                 # it REPLACES the previous PE signal candle
                 if self.pe_signal_candle is not None:
@@ -538,8 +559,8 @@ class CaptureMountainSignal(BaseStrategy):
                     if signal_candle_id in self.signal_candles_with_entry:
                         self.signal_candles_with_entry.remove(signal_candle_id)
                 
-                self.pe_signal_candle = previous_candle
-                self.status['signal_status'] = f"PE Signal Candle Identified: {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
+                self.pe_signal_candle = current_candle
+                self.status['signal_status'] = f"PE Signal Candle Identified (20s before close): {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.pe_signal_candle['date'].strftime('%H:%M') + '-' + (self.pe_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
                 self.status['signal_candle_high'] = self.pe_signal_candle['high']
                 self.status['signal_candle_low'] = self.pe_signal_candle['low']
@@ -549,7 +570,9 @@ class CaptureMountainSignal(BaseStrategy):
                     'candle_time': self.status['signal_candle_time'],
                     'high': self.pe_signal_candle['high'],
                     'low': self.pe_signal_candle['low'],
-                    'ema': previous_ema
+                    'ema': current_ema,
+                    'rsi': current_rsi,
+                    'evaluation_timing': '20_seconds_before_close'
                 })
                 # Append to today's signal history
                 try:
@@ -567,10 +590,11 @@ class CaptureMountainSignal(BaseStrategy):
                     pass
                 logging.info(self.status['signal_status'])
 
-        # CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30
-        if previous_candle['high'] < previous_ema:
+        # --- CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30 ---
+        # Note: We evaluate the forming candle at 20 seconds before close
+        if current_candle['high'] < current_ema:
             # RSI condition must be met at signal identification time
-            if previous_rsi is not None and previous_rsi < 30:
+            if current_rsi is not None and current_rsi < 30:
                 # Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < 30), 
                 # it REPLACES the previous CE signal candle
                 if self.ce_signal_candle is not None:
@@ -582,8 +606,8 @@ class CaptureMountainSignal(BaseStrategy):
                     if signal_candle_id in self.signal_candles_with_entry:
                         self.signal_candles_with_entry.remove(signal_candle_id)
                 
-                self.ce_signal_candle = previous_candle
-                self.status['signal_status'] = f"CE Signal Candle Identified: {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
+                self.ce_signal_candle = current_candle
+                self.status['signal_status'] = f"CE Signal Candle Identified (20s before close): {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
                 self.status['signal_candle_time'] = self.ce_signal_candle['date'].strftime('%H:%M') + '-' + (self.ce_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
                 self.status['signal_candle_high'] = self.ce_signal_candle['high']
                 self.status['signal_candle_low'] = self.ce_signal_candle['low']
@@ -593,7 +617,9 @@ class CaptureMountainSignal(BaseStrategy):
                     'candle_time': self.status['signal_candle_time'],
                     'high': self.ce_signal_candle['high'],
                     'low': self.ce_signal_candle['low'],
-                    'ema': previous_ema
+                    'ema': current_ema,
+                    'rsi': current_rsi,
+                    'evaluation_timing': '20_seconds_before_close'
                 })
                 # Append to today's signal history
                 try:
@@ -610,6 +636,27 @@ class CaptureMountainSignal(BaseStrategy):
                 except Exception:
                     pass
                 logging.info(self.status['signal_status'])
+
+    def _apply_strategy_logic(self):
+        df = pd.DataFrame(self.historical_data)
+        df['ema'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
+        
+        # Calculate RSI 14 for signal identification
+        if len(df) >= 15:  # Need at least 15 candles for RSI 14
+            df['rsi14'] = calculate_rsi(df['close'], period=14)
+        else:
+            df['rsi14'] = None
+
+        # Ensure we have at least two candles for signal/entry logic
+        if len(df) < 2:
+            self.status['signal_status'] = 'Not enough candles for signal identification.'
+            return
+
+        current_candle = df.iloc[-1]
+        current_ema = current_candle['ema']
+
+        # NOTE: Signal identification is now handled by _evaluate_signal_candle() 
+        # which runs 20 seconds before candle close. This method only handles entry/exit logic.
 
         # Track price action: Check if price has traded above PE signal low or below CE signal high
         # This validation is only needed AFTER a trade exit (stop loss or target)
@@ -628,112 +675,142 @@ class CaptureMountainSignal(BaseStrategy):
         # --- Trade Entry Logic ---
         if not self.trade_placed:
             # PE Entry: After exit, require price action validation
-            if self.pe_signal_candle is not None and current_candle['close'] < self.pe_signal_candle['low']:
-                # Check if this is first entry from this signal candle (no validation needed) or re-entry (validation required)
-                signal_candle_id = id(self.pe_signal_candle)  # Use signal candle object ID as identifier
-                is_first_entry = signal_candle_id not in self.signal_candles_with_entry
+            if self.pe_signal_candle is not None:
+                # Check if entry condition is met: current candle close < signal candle low
+                entry_condition_met = current_candle['close'] < self.pe_signal_candle['low']
                 
-                if is_first_entry:
-                    # First entry: no price action validation needed
-                    entry_allowed = True
+                if not entry_condition_met:
+                    # Entry condition not met yet - waiting for price to break below signal low
+                    self.status['signal_status'] = f"PE Signal Active - Waiting for Entry: Close must break below {self.pe_signal_candle['low']:.2f} (Current: {current_candle['close']:.2f})"
+                    logging.debug(f"PE Entry condition not met: Close ({current_candle['close']:.2f}) >= Signal Low ({self.pe_signal_candle['low']:.2f})")
                 else:
-                    # Re-entry: price action validation required
-                    entry_allowed = self.pe_signal_price_above_low
-                    if not entry_allowed:
-                        logging.info(f"PE re-entry blocked: Price action validation not met (need HIGH > {self.pe_signal_candle['low']:.2f})")
-                
-                if entry_allowed:
-                    self.position = -1  # Short position (Buy PE)
-                    self.entry_price = current_candle['close']
-                    self.trade_placed = True
-                    self.status['state'] = 'position_open'
-                    trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'PE')
-                    if trading_symbol and instrument_token:
-                        self.status['traded_instrument'] = trading_symbol
-                        self.status['traded_instrument_token'] = instrument_token
-                        self.status['stop_loss_level'] = self.pe_signal_candle['high'] # SL for PE is signal candle high
-                        self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                        order_id, _, _ = self._place_order(self.entry_price, 'PE', 'BUY')
+                    # Entry condition met - check if entry is allowed
+                    signal_candle_id = id(self.pe_signal_candle)  # Use signal candle object ID as identifier
+                    is_first_entry = signal_candle_id not in self.signal_candles_with_entry
+                    
+                    if is_first_entry:
+                        # First entry: no price action validation needed
+                        entry_allowed = True
                     else:
-                        logging.error("Could not get trading symbol for PE trade")
-                        return
-                    self.status['entry_order_id'] = order_id
-                    self.status['message'] = f"PE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
-                    self.trade_history.append({
-                        'time': current_candle['date'].strftime('%H:%M:%S'),
-                        'action': 'BUY PE',
-                        'price': self.entry_price,
-                        'instrument': self.status['traded_instrument'],
-                        'order_id': order_id
-                    })
-                    self._add_audit_trail('entry', self.status['message'], {
-                        'option_type': 'PE',
-                        'entry_price': self.entry_price,
-                        'stop_loss': self.status['stop_loss_level'],
-                        'signal_candle_high': self.pe_signal_candle['high'],
-                        'signal_candle_low': self.pe_signal_candle['low'],
-                        'instrument': trading_symbol,
-                        'order_id': order_id
-                    })
-                    logging.info(self.status['message'])
-                    # Mark this signal candle as having had an entry
-                    self.signal_candles_with_entry.add(signal_candle_id)
-                    # Reset price action validation after entry (for next exit/entry cycle)
-                    self.pe_signal_price_above_low = False
+                        # Re-entry: price action validation required
+                        entry_allowed = self.pe_signal_price_above_low
+                        if not entry_allowed:
+                            logging.info(f"PE re-entry blocked: Price action validation not met (need HIGH > {self.pe_signal_candle['low']:.2f})")
+                            self._add_audit_trail('entry_blocked', 
+                                f"PE re-entry blocked: Price must trade above {self.pe_signal_candle['low']:.2f} first",
+                                {
+                                    'signal_candle_low': self.pe_signal_candle['low'],
+                                    'current_high': current_candle['high'],
+                                    'reason': 'price_action_validation_failed'
+                                })
+                    
+                    if entry_allowed:
+                        self.position = -1  # Short position (Buy PE)
+                        self.entry_price = current_candle['close']
+                        self.trade_placed = True
+                        self.status['state'] = 'position_open'
+                        trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'PE')
+                        if trading_symbol and instrument_token:
+                            self.status['traded_instrument'] = trading_symbol
+                            self.status['traded_instrument_token'] = instrument_token
+                            self.status['stop_loss_level'] = self.pe_signal_candle['high'] # SL for PE is signal candle high
+                            self.status['target_profit_level'] = np.nan # Target calculated dynamically
+                            order_id, _, _ = self._place_order(self.entry_price, 'PE', 'BUY')
+                        else:
+                            logging.error("Could not get trading symbol for PE trade")
+                            return
+                        self.status['entry_order_id'] = order_id
+                        self.status['message'] = f"PE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
+                        self.trade_history.append({
+                            'time': current_candle['date'].strftime('%H:%M:%S'),
+                            'action': 'BUY PE',
+                            'price': self.entry_price,
+                            'instrument': self.status['traded_instrument'],
+                            'order_id': order_id
+                        })
+                        self._add_audit_trail('entry', self.status['message'], {
+                            'option_type': 'PE',
+                            'entry_price': self.entry_price,
+                            'stop_loss': self.status['stop_loss_level'],
+                            'signal_candle_high': self.pe_signal_candle['high'],
+                            'signal_candle_low': self.pe_signal_candle['low'],
+                            'instrument': trading_symbol,
+                            'order_id': order_id
+                        })
+                        logging.info(self.status['message'])
+                        # Mark this signal candle as having had an entry
+                        self.signal_candles_with_entry.add(signal_candle_id)
+                        # Reset price action validation after entry (for next exit/entry cycle)
+                        self.pe_signal_price_above_low = False
 
             # CE Entry: After exit, require price action validation
-            elif self.ce_signal_candle is not None and current_candle['close'] > self.ce_signal_candle['high']:
-                # Check if this is first entry from this signal candle (no validation needed) or re-entry (validation required)
-                signal_candle_id = id(self.ce_signal_candle)  # Use signal candle object ID as identifier
-                is_first_entry = signal_candle_id not in self.signal_candles_with_entry
+            elif self.ce_signal_candle is not None:
+                # Check if entry condition is met: current candle close > signal candle high
+                entry_condition_met = current_candle['close'] > self.ce_signal_candle['high']
                 
-                if is_first_entry:
-                    # First entry: no price action validation needed
-                    entry_allowed = True
+                if not entry_condition_met:
+                    # Entry condition not met yet - waiting for price to break above signal high
+                    self.status['signal_status'] = f"CE Signal Active - Waiting for Entry: Close must break above {self.ce_signal_candle['high']:.2f} (Current: {current_candle['close']:.2f})"
+                    logging.debug(f"CE Entry condition not met: Close ({current_candle['close']:.2f}) <= Signal High ({self.ce_signal_candle['high']:.2f})")
                 else:
-                    # Re-entry: price action validation required
-                    entry_allowed = self.ce_signal_price_below_high
-                    if not entry_allowed:
-                        logging.info(f"CE re-entry blocked: Price action validation not met (need LOW < {self.ce_signal_candle['high']:.2f})")
-                
-                if entry_allowed:
-                    self.position = 1  # Long position (Buy CE)
-                    self.entry_price = current_candle['close']
-                    self.trade_placed = True
-                    self.status['state'] = 'position_open'
-                    trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'CE')
-                    if trading_symbol and instrument_token:
-                        self.status['traded_instrument'] = trading_symbol
-                        self.status['traded_instrument_token'] = instrument_token
-                        self.status['stop_loss_level'] = self.ce_signal_candle['low'] # SL for CE is signal candle low
-                        self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                        order_id, _, _ = self._place_order(self.entry_price, 'CE', 'BUY')
+                    # Entry condition met - check if entry is allowed
+                    signal_candle_id = id(self.ce_signal_candle)  # Use signal candle object ID as identifier
+                    is_first_entry = signal_candle_id not in self.signal_candles_with_entry
+                    
+                    if is_first_entry:
+                        # First entry: no price action validation needed
+                        entry_allowed = True
                     else:
-                        logging.error("Could not get trading symbol for CE trade")
-                        return
-                    self.status['entry_order_id'] = order_id
-                    self.status['message'] = f"CE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
-                    self.trade_history.append({
-                        'time': current_candle['date'].strftime('%H:%M:%S'),
-                        'action': 'BUY CE',
-                        'price': self.entry_price,
-                        'instrument': self.status['traded_instrument'],
-                        'order_id': order_id
-                    })
-                    self._add_audit_trail('entry', self.status['message'], {
-                        'option_type': 'CE',
-                        'entry_price': self.entry_price,
-                        'stop_loss': self.status['stop_loss_level'],
-                        'signal_candle_high': self.ce_signal_candle['high'],
-                        'signal_candle_low': self.ce_signal_candle['low'],
-                        'instrument': trading_symbol,
-                        'order_id': order_id
-                    })
-                    logging.info(self.status['message'])
-                    # Mark this signal candle as having had an entry
-                    self.signal_candles_with_entry.add(signal_candle_id)
-                    # Reset price action validation after entry (for next exit/entry cycle)
-                    self.ce_signal_price_below_high = False
+                        # Re-entry: price action validation required
+                        entry_allowed = self.ce_signal_price_below_high
+                        if not entry_allowed:
+                            logging.info(f"CE re-entry blocked: Price action validation not met (need LOW < {self.ce_signal_candle['high']:.2f})")
+                            self._add_audit_trail('entry_blocked', 
+                                f"CE re-entry blocked: Price must trade below {self.ce_signal_candle['high']:.2f} first",
+                                {
+                                    'signal_candle_high': self.ce_signal_candle['high'],
+                                    'current_low': current_candle['low'],
+                                    'reason': 'price_action_validation_failed'
+                                })
+                    
+                    if entry_allowed:
+                        self.position = 1  # Long position (Buy CE)
+                        self.entry_price = current_candle['close']
+                        self.trade_placed = True
+                        self.status['state'] = 'position_open'
+                        trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'CE')
+                        if trading_symbol and instrument_token:
+                            self.status['traded_instrument'] = trading_symbol
+                            self.status['traded_instrument_token'] = instrument_token
+                            self.status['stop_loss_level'] = self.ce_signal_candle['low'] # SL for CE is signal candle low
+                            self.status['target_profit_level'] = np.nan # Target calculated dynamically
+                            order_id, _, _ = self._place_order(self.entry_price, 'CE', 'BUY')
+                        else:
+                            logging.error("Could not get trading symbol for CE trade")
+                            return
+                        self.status['entry_order_id'] = order_id
+                        self.status['message'] = f"CE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
+                        self.trade_history.append({
+                            'time': current_candle['date'].strftime('%H:%M:%S'),
+                            'action': 'BUY CE',
+                            'price': self.entry_price,
+                            'instrument': self.status['traded_instrument'],
+                            'order_id': order_id
+                        })
+                        self._add_audit_trail('entry', self.status['message'], {
+                            'option_type': 'CE',
+                            'entry_price': self.entry_price,
+                            'stop_loss': self.status['stop_loss_level'],
+                            'signal_candle_high': self.ce_signal_candle['high'],
+                            'signal_candle_low': self.ce_signal_candle['low'],
+                            'instrument': trading_symbol,
+                            'order_id': order_id
+                        })
+                        logging.info(self.status['message'])
+                        # Mark this signal candle as having had an entry
+                        self.signal_candles_with_entry.add(signal_candle_id)
+                        # Reset price action validation after entry (for next exit/entry cycle)
+                        self.ce_signal_price_below_high = False
 
         # --- Position Management (SL/Target) ---
         elif self.position != 0: # If a position is open
