@@ -566,195 +566,195 @@ const TrainModelPanel: React.FC = () => {
   };
 
   return (
-    <div className="card border-0 shadow-sm">
-      <div className="card-header bg-secondary text-white">
-        <h6 className="mb-0">
-          <i className="bi bi-graph-up-arrow me-2"></i>
-          LSTM Price Predictions (Phase 1)
-        </h6>
-      </div>
-      <div className="card-body">
-        <div className="row g-3 align-items-end">
-          <div className="col-md-2">
-            <label className="form-label">Symbol</label>
-            <select className="form-select" value={symbol} onChange={(e) => setSymbol(e.target.value as any)}>
-              <option value="NIFTY">NIFTY</option>
-              <option value="BANKNIFTY">BANKNIFTY</option>
-            </select>
-          </div>
-          <div className="col-md-2">
-            <label className="form-label">Years</label>
-            <select className="form-select" value={years} onChange={(e) => setYears(Number(e.target.value))}>
-              <option value={2}>2</option>
-              <option value={3}>3</option>
-            </select>
-          </div>
-          <div className="col-md-2">
-            <label className="form-label">Horizon (candles)</label>
-            <select className="form-select" value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}>
-              {[1, 2, 3, 4, 5, 6].map((h) => (
-                <option key={h} value={h}>{h}</option>
-              ))}
-            </select>
-          </div>
-          <div className="col-md-2">
-            <label className="form-label">Lookback</label>
-            <input className="form-control" type="number" value={lookback} min={30} max={200} onChange={(e) => setLookback(Number(e.target.value))} />
-          </div>
-          <div className="col-md-2">
-            <label className="form-label">Epochs</label>
-            <input className="form-control" type="number" value={epochs} min={5} max={50} onChange={(e) => setEpochs(Number(e.target.value))} />
-          </div>
-          <div className="col-md-2">
-            <label className="form-label">Predict Steps</label>
-            <select className="form-select" value={steps} onChange={(e) => setSteps(Number(e.target.value))}>
-              {[1, 2, 3, 4, 5, 6].map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </div>
+    <>
+      <div className="card border-0 shadow-sm">
+        <div className="card-header bg-secondary text-white">
+          <h6 className="mb-0">
+            <i className="bi bi-graph-up-arrow me-2"></i>
+            LSTM Price Predictions (Phase 1)
+          </h6>
         </div>
-
-        <div className="mt-3 d-flex gap-2">
-          <button className="btn btn-primary" onClick={trainModel} disabled={loading}>
-            {loading ? 'Training...' : 'Train Model'}
-          </button>
-          <button className="btn btn-outline-primary" onClick={runPrediction} disabled={loading}>
-            {loading ? 'Predicting...' : 'Predict Next'}
-          </button>
-          <button className="btn btn-outline-secondary" onClick={fetchOverlay} disabled={loading}>
-            {loading ? 'Loading...' : 'Show 3Y Overlay (70/30)'}
-          </button>
-        </div>
-
-        {error && (
-          <div className="alert alert-danger mt-3" role="alert">
-            <i className="bi bi-exclamation-triangle me-2"></i>
-            {error}
-          </div>
-        )}
-
-        {trainingInfo && (
-          <div className="mt-3">
-            <div className="alert alert-success">
-              <strong>Model Trained:</strong> {trainingInfo.symbol} h{trainingInfo.horizon} | Test MSE: {trainingInfo.test_mse ?? 'N/A'}
+        <div className="card-body">
+          <div className="row g-3 align-items-end">
+            <div className="col-md-2">
+              <label className="form-label">Symbol</label>
+              <select className="form-select" value={symbol} onChange={(e) => setSymbol(e.target.value as any)}>
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+              </select>
             </div>
-            <pre className="bg-light p-2 rounded" style={{ maxHeight: 200, overflow: 'auto' }}>
-{JSON.stringify({ loss: trainingInfo.history?.loss?.slice(-5), val_loss: trainingInfo.history?.val_loss?.slice(-5) }, null, 2)}
-            </pre>
-          </div>
-        )}
-
-        {prediction && (
-          <div className="mt-3">
-            <div className="alert alert-info">
-              <strong>Predictions ({steps} candles ahead):</strong>
-              <div className="mt-2">
-                {prediction.predictions.map((p: number, i: number) => (
-                  <span key={i} className="badge bg-secondary me-2">T+{i + 1}: ₹{p.toFixed(2)}</span>
+            <div className="col-md-2">
+              <label className="form-label">Years</label>
+              <select className="form-select" value={years} onChange={(e) => setYears(Number(e.target.value))}>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+            </div>
+            <div className="col-md-2">
+              <label className="form-label">Horizon (candles)</label>
+              <select className="form-select" value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}>
+                {[1, 2, 3, 4, 5, 6].map((h) => (
+                  <option key={h} value={h}>{h}</option>
                 ))}
-              </div>
-              <div className="mt-2"><strong>Confidence:</strong> {(prediction.confidence * 100).toFixed(1)}%</div>
+              </select>
+            </div>
+            <div className="col-md-2">
+              <label className="form-label">Lookback</label>
+              <input className="form-control" type="number" value={lookback} min={30} max={200} onChange={(e) => setLookback(Number(e.target.value))} />
+            </div>
+            <div className="col-md-2">
+              <label className="form-label">Epochs</label>
+              <input className="form-control" type="number" value={epochs} min={5} max={50} onChange={(e) => setEpochs(Number(e.target.value))} />
+            </div>
+            <div className="col-md-2">
+              <label className="form-label">Predict Steps</label>
+              <select className="form-select" value={steps} onChange={(e) => setSteps(Number(e.target.value))}>
+                {[1, 2, 3, 4, 5, 6].map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
             </div>
           </div>
-        )}
 
-        {overlaySeries.length > 0 && (
-          <div className="mt-3">
-            <h6>Actual vs Predicted (3 years, 70/30 split)</h6>
-            <OverlayChart data={overlaySeries} />
+          <div className="mt-3 d-flex gap-2">
+            <button className="btn btn-primary" onClick={trainModel} disabled={loading}>
+              {loading ? 'Training...' : 'Train Model'}
+            </button>
+            <button className="btn btn-outline-primary" onClick={runPrediction} disabled={loading}>
+              {loading ? 'Predicting...' : 'Predict Next'}
+            </button>
+            <button className="btn btn-outline-secondary" onClick={fetchOverlay} disabled={loading}>
+              {loading ? 'Loading...' : 'Show 3Y Overlay (70/30)'}
+            </button>
           </div>
-        )}
 
-        <hr className="my-4" />
+          {error && (
+            <div className="alert alert-danger mt-3" role="alert">
+              <i className="bi bi-exclamation-triangle me-2"></i>
+              {error}
+            </div>
+          )}
 
-        <div className="card border-0 shadow-sm">
-          <div className="card-header bg-success text-white">
-            <h6 className="mb-0">
-              <i className="bi bi-robot me-2"></i>
-              Reinforcement Learning - Mountain Signal Strategy
-            </h6>
+          {trainingInfo && (
+            <div className="mt-3">
+              <div className="alert alert-success">
+                <strong>Model Trained:</strong> {trainingInfo.symbol} h{trainingInfo.horizon} | Test MSE: {trainingInfo.test_mse ?? 'N/A'}
+              </div>
+              <pre className="bg-light p-2 rounded" style={{ maxHeight: 200, overflow: 'auto' }}>
+{JSON.stringify({ loss: trainingInfo.history?.loss?.slice(-5), val_loss: trainingInfo.history?.val_loss?.slice(-5) }, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {prediction && (
+            <div className="mt-3">
+              <div className="alert alert-info">
+                <strong>Predictions ({steps} candles ahead):</strong>
+                <div className="mt-2">
+                  {prediction.predictions.map((p: number, i: number) => (
+                    <span key={i} className="badge bg-secondary me-2">T+{i + 1}: ₹{p.toFixed(2)}</span>
+                  ))}
+                </div>
+                <div className="mt-2"><strong>Confidence:</strong> {(prediction.confidence * 100).toFixed(1)}%</div>
+              </div>
+            </div>
+          )}
+
+          {overlaySeries.length > 0 && (
+            <div className="mt-3">
+              <h6>Actual vs Predicted (3 years, 70/30 split)</h6>
+              <OverlayChart data={overlaySeries} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card border-0 shadow-sm mt-4">
+        <div className="card-header bg-success text-white">
+          <h6 className="mb-0">
+            <i className="bi bi-robot me-2"></i>
+            Reinforcement Learning - Mountain Signal Strategy
+          </h6>
+        </div>
+        <div className="card-body">
+          <div className="alert alert-info">
+            <strong>About:</strong> This RL agent learns to trade using Mountain Signal strategy rules.
+            It uses Deep Q-Network (DQN) to optimize entry/exit decisions based on PE/CE signals, RSI, and EMA indicators.
           </div>
-          <div className="card-body">
-            <div className="alert alert-info">
-              <strong>About:</strong> This RL agent learns to trade using Mountain Signal strategy rules.
-              It uses Deep Q-Network (DQN) to optimize entry/exit decisions based on PE/CE signals, RSI, and EMA indicators.
-            </div>
 
-            <div className="row g-3 align-items-end mb-3">
-              <div className="col-md-3">
-                <label className="form-label">Symbol</label>
-                <select className="form-select" value={rlSymbol} onChange={(e) => setRlSymbol(e.target.value as any)}>
-                  <option value="NIFTY">NIFTY</option>
-                  <option value="BANKNIFTY">BANKNIFTY</option>
-                </select>
-              </div>
-              <div className="col-md-2">
-                <label className="form-label">Years</label>
-                <select className="form-select" value={rlYears} onChange={(e) => setRlYears(Number(e.target.value))}>
-                  <option value={2}>2</option>
-                  <option value={3}>3</option>
-                </select>
-              </div>
-              <div className="col-md-2">
-                <label className="form-label">Episodes</label>
-                <input className="form-control" type="number" value={episodes} min={50} max={500} onChange={(e) => setEpisodes(Number(e.target.value))} />
-              </div>
-              <div className="col-md-2">
-                <label className="form-label">Epsilon</label>
-                <input className="form-control" type="number" step="0.1" value={epsilon} min={0.1} max={1.0} onChange={(e) => setEpsilon(Number(e.target.value))} />
-              </div>
-              <div className="col-md-3">
-                <label className="form-label">Epsilon Decay</label>
-                <input className="form-control" type="number" step="0.001" value={epsilonDecay} min={0.9} max={0.999} onChange={(e) => setEpsilonDecay(Number(e.target.value))} />
-              </div>
+          <div className="row g-3 align-items-end mb-3">
+            <div className="col-md-3">
+              <label className="form-label">Symbol</label>
+              <select className="form-select" value={rlSymbol} onChange={(e) => setRlSymbol(e.target.value as any)}>
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+              </select>
             </div>
-
-            <div className="d-flex gap-2 mb-3">
-              <button className="btn btn-success" onClick={trainRL} disabled={rlLoading}>
-                {rlLoading ? 'Training...' : 'Train RL Agent'}
-              </button>
-              <button className="btn btn-outline-success" onClick={evaluateRL} disabled={rlLoading || !rlTrainingInfo}>
-                {rlLoading ? 'Evaluating...' : 'Evaluate on Test Data'}
-              </button>
+            <div className="col-md-2">
+              <label className="form-label">Years</label>
+              <select className="form-select" value={rlYears} onChange={(e) => setRlYears(Number(e.target.value))}>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
             </div>
+            <div className="col-md-2">
+              <label className="form-label">Episodes</label>
+              <input className="form-control" type="number" value={episodes} min={50} max={500} onChange={(e) => setEpisodes(Number(e.target.value))} />
+            </div>
+            <div className="col-md-2">
+              <label className="form-label">Epsilon</label>
+              <input className="form-control" type="number" step="0.1" value={epsilon} min={0.1} max={1.0} onChange={(e) => setEpsilon(Number(e.target.value))} />
+            </div>
+            <div className="col-md-3">
+              <label className="form-label">Epsilon Decay</label>
+              <input className="form-control" type="number" step="0.001" value={epsilonDecay} min={0.9} max={0.999} onChange={(e) => setEpsilonDecay(Number(e.target.value))} />
+            </div>
+          </div>
 
-            {rlTrainingInfo && (
-              <div className="mt-3">
-                <div className="alert alert-success">
-                  <h6><strong>Training Complete!</strong></h6>
-                  <div className="row">
-                    <div className="col-md-6">
-                      <p><strong>Symbol:</strong> {rlTrainingInfo.symbol}</p>
-                      <p><strong>Episodes:</strong> {rlTrainingInfo.episodes}</p>
-                      <p><strong>Final Reward:</strong> {rlTrainingInfo.final_reward?.toFixed(2) || 'N/A'}</p>
-                      <p><strong>Final PnL:</strong> ₹{rlTrainingInfo.final_pnl?.toFixed(2) || 'N/A'}</p>
-                    </div>
-                    <div className="col-md-6">
-                      <p><strong>Total Trades:</strong> {rlTrainingInfo.trade_count ?? 'N/A'}</p>
-                      <p><strong>Win Ratio:</strong> {(rlTrainingInfo.win_ratio * 100).toFixed(1)}%</p>
-                      <p><strong>Max Drawdown:</strong> {rlTrainingInfo.max_drawdown?.toFixed(2) || 'N/A'}</p>
-                    </div>
+          <div className="d-flex gap-2 mb-3">
+            <button className="btn btn-success" onClick={trainRL} disabled={rlLoading}>
+              {rlLoading ? 'Training...' : 'Train RL Agent'}
+            </button>
+            <button className="btn btn-outline-success" onClick={evaluateRL} disabled={rlLoading || !rlTrainingInfo}>
+              {rlLoading ? 'Evaluating...' : 'Evaluate on Test Data'}
+            </button>
+          </div>
+
+          {rlTrainingInfo && (
+            <div className="mt-3">
+              <div className="alert alert-success">
+                <h6><strong>Training Complete!</strong></h6>
+                <div className="row">
+                  <div className="col-md-6">
+                    <p><strong>Symbol:</strong> {rlTrainingInfo.symbol}</p>
+                    <p><strong>Episodes:</strong> {rlTrainingInfo.episodes}</p>
+                    <p><strong>Final Reward:</strong> {rlTrainingInfo.final_reward?.toFixed(2) || 'N/A'}</p>
+                    <p><strong>Final PnL:</strong> ₹{rlTrainingInfo.final_pnl?.toFixed(2) || 'N/A'}</p>
+                  </div>
+                  <div className="col-md-6">
+                    <p><strong>Total Trades:</strong> {rlTrainingInfo.trade_count ?? 'N/A'}</p>
+                    <p><strong>Win Ratio:</strong> {(rlTrainingInfo.win_ratio * 100).toFixed(1)}%</p>
+                    <p><strong>Max Drawdown:</strong> {rlTrainingInfo.max_drawdown?.toFixed(2) || 'N/A'}</p>
                   </div>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {rlEvaluationResults && (
-              <div className="mt-3">
-                <div className="alert alert-primary">
-                  <h6><strong>Evaluation Results</strong></h6>
-                  <p><strong>Period:</strong> {rlEvaluationResults.period}</p>
-                  <p><strong>Net PnL:</strong> ₹{rlEvaluationResults.pnl?.toFixed(2)}</p>
-                  <p><strong>Winning Trades:</strong> {rlEvaluationResults.wins}</p>
-                  <p><strong>Losing Trades:</strong> {rlEvaluationResults.losses}</p>
-                </div>
+          {rlEvaluationResults && (
+            <div className="mt-3">
+              <div className="alert alert-primary">
+                <h6><strong>Evaluation Results</strong></h6>
+                <p><strong>Period:</strong> {rlEvaluationResults.period}</p>
+                <p><strong>Net PnL:</strong> ₹{rlEvaluationResults.pnl?.toFixed(2)}</p>
+                <p><strong>Winning Trades:</strong> {rlEvaluationResults.wins}</p>
+                <p><strong>Losing Trades:</strong> {rlEvaluationResults.losses}</p>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
-    </div>
+    </>
   );
 };
 
