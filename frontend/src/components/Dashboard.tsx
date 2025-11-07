@@ -7,7 +7,6 @@ import AlgoVisualizationContent from './AlgoVisualizationContent';
 import PaperTradeContent from './PaperTradeContent';
 import BacktestContent from './BacktestContent';
 import MarketReplayContent from './MarketReplayContent';
-import TickDataContent from './TickDataContent';
 import ChartContent from './ChartContent';
 import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
@@ -262,7 +261,7 @@ const Dashboard: React.FC = () => {
             balance={balance}
             access_token={accessToken}
             onViewLiveStrategy={handleViewLiveStrategy}
-            onViewChart={handleViewChart} // This will be passed down to TickDataContent eventually
+            onViewChart={handleViewChart}
           />
         );
       case 'algo-visualization':
@@ -273,8 +272,6 @@ const Dashboard: React.FC = () => {
         return <BacktestContent />;
       case 'market-replay':
         return <MarketReplayContent />;
-      case 'tick-data':
-        return <TickDataContent onViewChart={handleViewChart} />;
       case 'chat':
         return <ChartContent />;
       case 'ai-ml':
