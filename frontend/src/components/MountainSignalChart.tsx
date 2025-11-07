@@ -76,6 +76,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [chartData, setChartData] = useState<ChartDataResponse>({ candles: [], ema5: [] });
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null);
   const [signalCandles, setSignalCandles] = useState<SignalCandle[]>([]);
   const [tradeEvents, setTradeEvents] = useState<TradeEvent[]>([]);
   const [peBreakLevel, setPeBreakLevel] = useState<number | null>(null);
@@ -170,6 +171,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
       const data: ChartDataResponse = await response.json();
       setChartData(data);
+      setLastUpdateTime(new Date()); // Track when data was last updated
 
       if (data.candles.length === 0) {
         setError('No data available for the selected date');
@@ -191,6 +193,24 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       fetchChartData();
     }
   }, [selectedDate, fetchChartData]);
+
+  // Auto-refresh when viewing today's date (every 30 seconds for live P&L updates)
+  useEffect(() => {
+    if (!selectedDate) return;
+    
+    const today = new Date().toISOString().split('T')[0];
+    const isToday = selectedDate === today;
+    
+    if (isToday && activeTab === 'chart') {
+      // Set up auto-refresh interval
+      const refreshInterval = setInterval(() => {
+        console.log('Auto-refreshing chart data for live P&L updates...');
+        fetchChartData();
+      }, 30000); // Refresh every 30 seconds
+      
+      return () => clearInterval(refreshInterval);
+    }
+  }, [selectedDate, activeTab, fetchChartData]);
 
   const processMountainSignalLogic = (data: ChartDataResponse) => {
     /**
@@ -1455,6 +1475,30 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
           {chartDataFormatted.length > 0 && (
             <div className="mb-3">
+              {(() => {
+                const today = new Date().toISOString().split('T')[0];
+                const isToday = selectedDate === today;
+                const openTrades = tradeHistory.filter(t => !t.exitTime).length;
+                
+                if (isToday && openTrades > 0) {
+                  return (
+                    <div className="alert alert-info mb-2 py-2">
+                      <div className="d-flex justify-content-between align-items-center">
+                        <span>
+                          <i className="bi bi-broadcast me-2"></i>
+                          <strong>Live P&L Tracking Active</strong> - Auto-refreshing every 30 seconds
+                        </span>
+                        {lastUpdateTime && (
+                          <small className="text-muted">
+                            Last updated: {lastUpdateTime.toLocaleTimeString()}
+                          </small>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
               <div className="row text-center">
                 <div className="col-md-3">
                   <span className="badge bg-danger me-2">PE Signal</span>
@@ -1816,6 +1860,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               <i className="bi bi-table me-2"></i>
               Trade History & P&L Analysis {(!filterPE || !filterCE) && '(Filtered)'}
             </h5>
+            <small className="text-white-50">
+              <i className="bi bi-broadcast me-1"></i>
+              Open trades show live unrealized P&L based on latest price
+            </small>
           </div>
           <div className="card-body">
             <div className="table-responsive">
@@ -1838,8 +1886,27 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                   </tr>
                 </thead>
                 <tbody>
-                  {tradeHistory.filter(trade => (trade.signalType === 'PE' && filterPE) || (trade.signalType === 'CE' && filterCE)).map((trade, index) => (
-                    <tr key={index}>
+                  {tradeHistory.filter(trade => (trade.signalType === 'PE' && filterPE) || (trade.signalType === 'CE' && filterCE)).map((trade, index) => {
+                    // Calculate live P&L for open trades using latest candle close
+                    const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                    let livePnl = trade.pnl;
+                    let livePnlPercent = trade.pnlPercent;
+                    
+                    // If trade is open and we have latest price, calculate unrealized P&L
+                    if (!trade.exitTime && latestClose) {
+                      if (trade.signalType === 'PE') {
+                        // PE: Profit when price goes down (current < entry)
+                        livePnl = (trade.entryPrice - latestClose) * 50; // Assuming 50 units per lot
+                        livePnlPercent = ((trade.entryPrice - latestClose) / trade.entryPrice) * 100;
+                      } else {
+                        // CE: Profit when price goes up (current > entry)
+                        livePnl = (latestClose - trade.entryPrice) * 50;
+                        livePnlPercent = ((latestClose - trade.entryPrice) / trade.entryPrice) * 100;
+                      }
+                    }
+                    
+                    return (
+                    <tr key={index} className={!trade.exitTime ? 'table-warning' : ''}>
                       <td><strong>{index + 1}</strong></td>
                       <td>{formatDateTime(trade.signalTime)}</td>
                       <td>
@@ -1851,8 +1918,24 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                       <td>{trade.signalLow.toFixed(2)}</td>
                       <td>{formatDateTime(trade.entryTime)}</td>
                       <td><strong>{trade.entryPrice.toFixed(2)}</strong></td>
-                      <td>{trade.exitTime ? formatDateTime(trade.exitTime) : <span className="text-muted">-</span>}</td>
-                      <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : <span className="text-muted">-</span>}</td>
+                      <td>
+                        {trade.exitTime ? formatDateTime(trade.exitTime) : (
+                          <span className="text-primary fw-bold">
+                            <i className="bi bi-activity me-1"></i>Live
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {trade.exitPrice ? trade.exitPrice.toFixed(2) : (
+                          latestClose ? (
+                            <span className="text-primary fw-bold">
+                              {latestClose.toFixed(2)} <small className="text-muted">(LTP)</small>
+                            </span>
+                          ) : (
+                            <span className="text-muted">-</span>
+                          )
+                        )}
+                      </td>
                       <td>
                         {trade.exitType ? (
                           <span className={`badge ${
@@ -1865,22 +1948,24 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                              'Target'}
                           </span>
                         ) : (
-                          <span className="text-muted">-</span>
+                          <span className="badge bg-info">Pending</span>
                         )}
                       </td>
                       <td>
-                        {trade.pnl !== null ? (
-                          <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
-                            {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+                        {livePnl !== null ? (
+                          <span className={`fw-bold ${livePnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}
+                            {!trade.exitTime && <small className="text-muted ms-1">(Live)</small>}
                           </span>
                         ) : (
                           <span className="text-muted">-</span>
                         )}
                       </td>
                       <td>
-                        {trade.pnlPercent !== null ? (
-                          <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
-                            {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
+                        {livePnlPercent !== null ? (
+                          <span className={`fw-bold ${livePnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {livePnlPercent >= 0 ? '+' : ''}{livePnlPercent.toFixed(2)}%
+                            {!trade.exitTime && <small className="text-muted ms-1">(Live)</small>}
                           </span>
                         ) : (
                           <span className="text-muted">-</span>
@@ -1890,44 +1975,87 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         {trade.exitTime ? (
                           <span className="badge bg-secondary">Closed</span>
                         ) : (
-                          <span className="badge bg-success">Open</span>
+                          <span className="badge bg-success">
+                            <i className="bi bi-broadcast me-1"></i>Open
+                          </span>
                         )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {/* Summary Row */}
                   <tr className="table-info fw-bold">
-                    <td colSpan={10} className="text-end">Total P&L:</td>
+                    <td colSpan={10} className="text-end">Total P&L (Realized + Unrealized):</td>
                     <td>
                       {(() => {
-                        const totalPnL = tradeHistory
-                          .filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE))
-                          .filter(t => t.pnl !== null)
-                          .reduce((sum, t) => sum + (t.pnl || 0), 0);
+                        const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                        const filteredTrades = tradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        
+                        const totalPnL = filteredTrades.reduce((sum, t) => {
+                          if (t.pnl !== null) {
+                            // Closed trade - use actual P&L
+                            return sum + t.pnl;
+                          } else if (latestClose) {
+                            // Open trade - calculate live unrealized P&L
+                            const livePnl = t.signalType === 'PE' 
+                              ? (t.entryPrice - latestClose) * 50
+                              : (latestClose - t.entryPrice) * 50;
+                            return sum + livePnl;
+                          }
+                          return sum;
+                        }, 0);
+                        
+                        const hasOpenTrades = filteredTrades.some(t => !t.exitTime);
+                        
                         return (
                           <span className={totalPnL >= 0 ? 'text-success' : 'text-danger'}>
                             {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}
+                            {hasOpenTrades && <small className="text-muted ms-1">(Live)</small>}
                           </span>
                         );
                       })()}
                     </td>
                     <td>
                       {(() => {
-                        const totalPnLPercent = tradeHistory
-                          .filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE))
-                          .filter(t => t.pnlPercent !== null)
-                          .reduce((sum, t) => sum + (t.pnlPercent || 0), 0);
+                        const latestClose = chartData.candles.length > 0 ? chartData.candles[chartData.candles.length - 1].c : null;
+                        const filteredTrades = tradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        
+                        const totalPnLPercent = filteredTrades.reduce((sum, t) => {
+                          if (t.pnlPercent !== null) {
+                            // Closed trade - use actual P&L %
+                            return sum + t.pnlPercent;
+                          } else if (latestClose) {
+                            // Open trade - calculate live unrealized P&L %
+                            const livePnlPercent = t.signalType === 'PE'
+                              ? ((t.entryPrice - latestClose) / t.entryPrice) * 100
+                              : ((latestClose - t.entryPrice) / t.entryPrice) * 100;
+                            return sum + livePnlPercent;
+                          }
+                          return sum;
+                        }, 0);
+                        
+                        const hasOpenTrades = filteredTrades.some(t => !t.exitTime);
+                        
                         return (
                           <span className={totalPnLPercent >= 0 ? 'text-success' : 'text-danger'}>
                             {totalPnLPercent >= 0 ? '+' : ''}{totalPnLPercent.toFixed(2)}%
+                            {hasOpenTrades && <small className="text-muted ms-1">(Live)</small>}
                           </span>
                         );
                       })()}
                     </td>
                     <td>
-                      <span className="badge bg-primary">
-                        {tradeHistory.filter(t => t.exitTime).length} / {tradeHistory.length} Closed
-                      </span>
+                      {(() => {
+                        const filteredTrades = tradeHistory.filter(t => (t.signalType === 'PE' && filterPE) || (t.signalType === 'CE' && filterCE));
+                        const closedTrades = filteredTrades.filter(t => t.exitTime).length;
+                        const openTrades = filteredTrades.filter(t => !t.exitTime).length;
+                        return (
+                          <>
+                            <span className="badge bg-secondary me-1">{closedTrades} Closed</span>
+                            {openTrades > 0 && <span className="badge bg-success">{openTrades} Open</span>}
+                          </>
+                        );
+                      })()}
                     </td>
                   </tr>
                 </tbody>
