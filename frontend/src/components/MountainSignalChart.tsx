@@ -201,21 +201,34 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [backtestResults, setBacktestResults] = useState<{
     trades: Array<{
-      signalIndex: number;
       signalTime: string;
       signalType: 'PE' | 'CE';
       signalHigh: number;
       signalLow: number;
-      entryIndex: number;
       entryTime: string;
       entryPrice: number;
-      exitIndex: number | null;
       exitTime: string | null;
       exitPrice: number | null;
-      exitType: 'STOP_LOSS' | 'TARGET' | 'MKT_CLOSE' | null;
+      exitType:
+        | 'STOP_LOSS'
+        | 'TARGET'
+        | 'MKT_CLOSE'
+        | 'OPTION_STOP_LOSS'
+        | 'OPTION_TARGET'
+        | 'INDEX_STOP'
+        | 'INDEX_TARGET'
+        | 'FORCED_CLOSE'
+        | null;
       pnl: number | null;
       pnlPercent: number | null;
       date: string;
+      lotSize: number | null;
+      optionTradeId: number | null;
+      optionSymbol: string | null;
+      optionEntryPrice: number | null;
+      stopLossPrice: number | null;
+      targetPrice: number | null;
+      optionExitPrice: number | null;
     }>;
     summary: {
       totalTrades: number;
@@ -226,6 +239,39 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       averagePnl: number;
       maxDrawdown: number;
       maxDrawdownPercent: number;
+      maxWinningDay: { date: string; pnl: number };
+      maxLosingDay: { date: string; pnl: number };
+    };
+    optionTrades: Array<{
+      id: number | null;
+      indexTradeIndex: number | null;
+      signalTime: string;
+      signalType: 'PE' | 'CE';
+      signalHigh: number | null;
+      signalLow: number | null;
+      entryTime: string;
+      indexAtEntry: number | null;
+      atmStrike: number | null;
+      optionSymbol: string | null;
+      optionEntryPrice: number | null;
+      stopLossPrice: number | null;
+      targetPrice: number | null;
+      optionExitPrice: number | null;
+      exitTime: string | null;
+      exitType: string | null;
+      pnl: number | null;
+      pnlPercent: number | null;
+      status: string;
+      lotSize: number | null;
+      date: string;
+    }>;
+    optionSummary: {
+      totalTrades: number;
+      winningTrades: number;
+      losingTrades: number;
+      winRate: number;
+      totalPnl: number;
+      averagePnl: number;
       maxWinningDay: { date: string; pnl: number };
       maxLosingDay: { date: string; pnl: number };
     };
@@ -260,6 +306,51 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const formatNumericValue = (value: number): string => {
     const decimals = Number.isInteger(value) ? 0 : 2;
     return value.toFixed(decimals).replace(/\.00$/, '');
+  };
+
+  const getExitBadgeClass = (exitType: string | null | undefined): string => {
+    switch (exitType) {
+      case 'STOP_LOSS':
+      case 'OPTION_STOP_LOSS':
+      case 'INDEX_STOP':
+        return 'bg-danger';
+      case 'TARGET':
+      case 'OPTION_TARGET':
+      case 'INDEX_TARGET':
+        return 'bg-warning';
+      case 'MKT_CLOSE':
+      case 'MARKET_CLOSE':
+        return 'bg-secondary';
+      case 'FORCED_CLOSE':
+        return 'bg-dark';
+      default:
+        return 'bg-primary';
+    }
+  };
+
+  const getExitLabel = (exitType: string | null | undefined): string => {
+    switch (exitType) {
+      case 'STOP_LOSS':
+        return 'Stop Loss';
+      case 'TARGET':
+        return 'Target';
+      case 'MKT_CLOSE':
+        return 'Market Close';
+      case 'OPTION_STOP_LOSS':
+        return 'Option SL';
+      case 'OPTION_TARGET':
+        return 'Option Target';
+      case 'INDEX_STOP':
+        return 'Index Stop';
+      case 'INDEX_TARGET':
+        return 'Index Target';
+      case 'MARKET_CLOSE':
+        return 'Market Close';
+      case 'FORCED_CLOSE':
+        return 'Forced Close';
+      default:
+        return exitType || '-';
+    }
   };
 
   const stopLossPercentSigned = ruleConfig.optionTrade.stopLossPercent * 100;
@@ -1475,7 +1566,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             )}
 
             {backtestResults && (() => {
-              // Filter trades based on PE/CE checkboxes
               const filteredTrades = backtestResults.trades.filter(trade => {
                 if (filterPE && filterCE) return true;
                 if (filterPE && trade.signalType === 'PE') return true;
@@ -1483,16 +1573,32 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 return false;
               });
 
-              // Calculate filtered summary metrics
+              const optionTrades = backtestResults.optionTrades || [];
+              const filteredOptionTrades = optionTrades.filter(trade => {
+                if (filterPE && filterCE) return true;
+                if (filterPE && trade.signalType === 'PE') return true;
+                if (filterCE && trade.signalType === 'CE') return true;
+                return false;
+              });
+
               const closedFilteredTrades = filteredTrades.filter(t => t.exitTime !== null);
+              const optionClosedFilteredTrades = filteredOptionTrades.filter(t => t.exitTime !== null);
+
               const filteredTotalTrades = closedFilteredTrades.length;
               const filteredWinningTrades = closedFilteredTrades.filter(t => t.pnl !== null && t.pnl > 0).length;
               const filteredLosingTrades = closedFilteredTrades.filter(t => t.pnl !== null && t.pnl <= 0).length;
-              const filteredWinRate = filteredTotalTrades > 0 ? (filteredWinningTrades / filteredTotalTrades * 100) : 0;
+              const filteredWinRate = filteredTotalTrades > 0 ? (filteredWinningTrades / filteredTotalTrades) * 100 : 0;
               const filteredTotalPnl = closedFilteredTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
               const filteredAveragePnl = filteredTotalTrades > 0 ? filteredTotalPnl / filteredTotalTrades : 0;
 
-              // Group trades by date
+              const optionFilteredTotalTrades = optionClosedFilteredTrades.length;
+              const optionFilteredWinningTrades = optionClosedFilteredTrades.filter(t => t.pnl !== null && t.pnl > 0).length;
+              const optionFilteredLosingTrades = optionClosedFilteredTrades.filter(t => t.pnl !== null && t.pnl <= 0).length;
+              const optionFilteredWinRate = optionFilteredTotalTrades > 0 ? (optionFilteredWinningTrades / optionFilteredTotalTrades) * 100 : 0;
+              const optionFilteredTotalPnl = optionClosedFilteredTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+              const optionFilteredAveragePnl = optionFilteredTotalTrades > 0 ? optionFilteredTotalPnl / optionFilteredTotalTrades : 0;
+              const optionOpenTrades = filteredOptionTrades.length - optionFilteredTotalTrades;
+
               const tradesByDate = filteredTrades.reduce((acc, trade) => {
                 const dateKey = trade.date;
                 if (!acc[dateKey]) {
@@ -1502,17 +1608,29 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 return acc;
               }, {} as Record<string, typeof filteredTrades>);
 
-              // Calculate daily P&L for filtered trades
-              const dailyPnl: Record<string, number> = {};
-              closedFilteredTrades.forEach(trade => {
+              const optionTradesByDate = filteredOptionTrades.reduce((acc, trade) => {
                 const dateKey = trade.date;
-                if (!dailyPnl[dateKey]) {
-                  dailyPnl[dateKey] = 0;
+                if (!acc[dateKey]) {
+                  acc[dateKey] = [];
                 }
-                dailyPnl[dateKey] += trade.pnl || 0;
+                acc[dateKey].push(trade);
+                return acc;
+              }, {} as Record<string, typeof filteredOptionTrades>);
+
+              const optionDailyPnlFiltered: Record<string, number> = {};
+              optionClosedFilteredTrades.forEach(trade => {
+                const dateKey = trade.date;
+                if (!optionDailyPnlFiltered[dateKey]) {
+                  optionDailyPnlFiltered[dateKey] = 0;
+                }
+                optionDailyPnlFiltered[dateKey] += trade.pnl || 0;
               });
 
-              const sortedDates = Object.keys(tradesByDate).sort();
+              const dateSet = new Set<string>([
+                ...Object.keys(tradesByDate),
+                ...Object.keys(optionTradesByDate),
+              ]);
+              const sortedDates = Array.from(dateSet).sort();
 
               const toggleDate = (date: string) => {
                 const newExpanded = new Set(expandedDates);
@@ -1523,6 +1641,17 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 }
                 setExpandedDates(newExpanded);
               };
+
+              let optionFilteredMaxWinningDay = { date: '', pnl: 0 };
+              let optionFilteredMaxLosingDay = { date: '', pnl: 0 };
+              Object.entries(optionDailyPnlFiltered).forEach(([dateKey, pnl]) => {
+                if (optionFilteredMaxWinningDay.date === '' || pnl > optionFilteredMaxWinningDay.pnl) {
+                  optionFilteredMaxWinningDay = { date: dateKey, pnl };
+                }
+                if (optionFilteredMaxLosingDay.date === '' || pnl < optionFilteredMaxLosingDay.pnl) {
+                  optionFilteredMaxLosingDay = { date: dateKey, pnl };
+                }
+              });
 
               return (
                 <>
@@ -1580,7 +1709,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                       <div className="row">
                         <div className="col-md-3 mb-3">
                           <div className="text-center p-3 bg-light rounded">
-                            <div className="text-muted small">Total Trades</div>
+                            <div className="text-muted small">Total Trades (Index)</div>
                             <div className="h4 mb-0 fw-bold">{filteredTotalTrades}</div>
                             <div className="small text-muted">
                               {filteredWinningTrades}W / {filteredLosingTrades}L
@@ -1615,7 +1744,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         </div>
                         <div className="col-md-6 mb-3">
                           <div className="text-center p-3 bg-success bg-opacity-10 rounded">
-                            <div className="text-muted small">Max Winning Day</div>
+                            <div className="text-muted small">Max Winning Day (Index)</div>
                             <div className="h5 mb-0 fw-bold text-success">
                               {new Date(backtestResults.summary.maxWinningDay.date).toLocaleDateString()}
                             </div>
@@ -1624,11 +1753,83 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         </div>
                         <div className="col-md-6 mb-3">
                           <div className="text-center p-3 bg-danger bg-opacity-10 rounded">
-                            <div className="text-muted small">Max Losing Day</div>
+                            <div className="text-muted small">Max Losing Day (Index)</div>
                             <div className="h5 mb-0 fw-bold text-danger">
                               {new Date(backtestResults.summary.maxLosingDay.date).toLocaleDateString()}
                             </div>
                             <div className="text-danger">₹{backtestResults.summary.maxLosingDay.pnl.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <hr className="my-4" />
+
+                      <div className="row">
+                        <div className="col-12">
+                          <h6 className="text-muted text-uppercase small mb-3">
+                            Option Trades (Simulation) {(!filterPE || !filterCE) && `(Filtered)`}
+                          </h6>
+                        </div>
+                      </div>
+                      <div className="row">
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Total Option Trades</div>
+                            <div className="h4 mb-0 fw-bold">{optionFilteredTotalTrades}</div>
+                            <div className="small text-muted">
+                              {optionFilteredWinningTrades}W / {optionFilteredLosingTrades}L
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Win Rate</div>
+                            <div className="h4 mb-0 fw-bold" style={{ color: optionFilteredWinRate >= 50 ? '#28a745' : '#dc3545' }}>
+                              {optionFilteredWinRate.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Total Option P&L</div>
+                            <div className={`h4 mb-0 fw-bold ${optionFilteredTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                              {optionFilteredTotalPnl >= 0 ? '+' : ''}{optionFilteredTotalPnl.toFixed(2)}
+                            </div>
+                            <div className="text-muted small">Avg: {optionFilteredAveragePnl >= 0 ? '+' : ''}{optionFilteredAveragePnl.toFixed(2)}</div>
+                          </div>
+                        </div>
+                        <div className="col-md-3 mb-3">
+                          <div className="text-center p-3 bg-light rounded">
+                            <div className="text-muted small">Open Option Trades</div>
+                            <div className="h4 mb-0 fw-bold">{optionOpenTrades}</div>
+                            <div className="small text-muted">Awaiting exit</div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-3">
+                          <div className="text-center p-3 bg-success bg-opacity-10 rounded">
+                            <div className="text-muted small">Max Winning Day (Options)</div>
+                            <div className="h5 mb-0 fw-bold text-success">
+                              {optionFilteredMaxWinningDay.date
+                                ? new Date(optionFilteredMaxWinningDay.date).toLocaleDateString()
+                                : 'N/A'}
+                            </div>
+                            <div className="text-success">
+                              {optionFilteredMaxWinningDay.pnl >= 0 ? '+' : ''}
+                              ₹{optionFilteredMaxWinningDay.pnl.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-md-6 mb-3">
+                          <div className="text-center p-3 bg-danger bg-opacity-10 rounded">
+                            <div className="text-muted small">Max Losing Day (Options)</div>
+                            <div className="h5 mb-0 fw-bold text-danger">
+                              {optionFilteredMaxLosingDay.date
+                                ? new Date(optionFilteredMaxLosingDay.date).toLocaleDateString()
+                                : 'N/A'}
+                            </div>
+                            <div className="text-danger">
+                              ₹{optionFilteredMaxLosingDay.pnl.toFixed(2)}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1665,11 +1866,13 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                           </thead>
                           <tbody>
                             {sortedDates.map((dateKey, dateIndex) => {
-                              const dateTrades = tradesByDate[dateKey];
-                              const datePnl = dailyPnl[dateKey] || 0;
+                              const dateTrades = tradesByDate[dateKey] ?? [];
+                              const optionTradesForDate = optionTradesByDate[dateKey] ?? [];
                               const isExpanded = expandedDates.has(dateKey);
                               const closedTradesForDate = dateTrades.filter(t => t.exitTime !== null);
                               const dateTotalPnl = closedTradesForDate.reduce((sum, t) => sum + (t.pnl || 0), 0);
+                              const optionClosedForDate = optionTradesForDate.filter(t => t.exitTime !== null);
+                              const optionDateTotalPnl = optionClosedForDate.reduce((sum, t) => sum + (t.pnl || 0), 0);
                               
                               return (
                                 <React.Fragment key={dateKey}>
@@ -1682,64 +1885,172 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                                       <i className={`bi bi-chevron-${isExpanded ? 'down' : 'right'}`}></i>
                                     </td>
                                     <td colSpan={11}>
-                                      <div className="d-flex justify-content-between align-items-center">
-                                        <span>
+                                      <div className="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center gap-2">
+                                        <span className="d-flex align-items-center flex-wrap gap-2">
                                           <i className="bi bi-calendar3 me-2"></i>
                                           {new Date(dateKey).toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
-                                          <span className="badge bg-info ms-2">{dateTrades.length} trade{dateTrades.length !== 1 ? 's' : ''}</span>
+                                          {dateTrades.length > 0 && (
+                                            <span className="badge bg-info">
+                                              {dateTrades.length} index trade{dateTrades.length !== 1 ? 's' : ''}
+                                            </span>
+                                          )}
+                                          {optionTradesForDate.length > 0 && (
+                                            <span className="badge bg-secondary">
+                                              {optionTradesForDate.length} option trade{optionTradesForDate.length !== 1 ? 's' : ''}
+                                            </span>
+                                          )}
                                         </span>
-                                        <span className={`fw-bold ${dateTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
-                                          Daily P&L: {dateTotalPnl >= 0 ? '+' : ''}{dateTotalPnl.toFixed(2)}
-                                        </span>
+                                        <div className="d-flex flex-column flex-md-row gap-3">
+                                          <span className={`fw-bold ${dateTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                            Index P&L: {dateTotalPnl >= 0 ? '+' : ''}{dateTotalPnl.toFixed(2)}
+                                          </span>
+                                          {optionTradesForDate.length > 0 && (
+                                            <span className={`fw-bold ${optionDateTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                              Option P&L: {optionDateTotalPnl >= 0 ? '+' : ''}{optionDateTotalPnl.toFixed(2)}
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
                                     </td>
                                   </tr>
-                                  {isExpanded && dateTrades.map((trade, tradeIndex) => (
-                                    <tr key={`${dateKey}-${tradeIndex}`} className="table-light">
-                                      <td></td>
-                                      <td>{dateIndex * 1000 + tradeIndex + 1}</td>
-                                      <td>{new Date(trade.date).toLocaleDateString()}</td>
-                                      <td>{new Date(trade.signalTime).toLocaleTimeString()}</td>
-                                      <td>
-                                        <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
-                                          {trade.signalType}
-                                        </span>
-                                      </td>
-                                      <td>{new Date(trade.entryTime).toLocaleTimeString()}</td>
-                                      <td>{trade.entryPrice.toFixed(2)}</td>
-                                      <td>{trade.exitTime ? new Date(trade.exitTime).toLocaleTimeString() : '-'}</td>
-                                      <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : '-'}</td>
-                                      <td>
-                                        {trade.exitType ? (
-                                          <span className={`badge ${
-                                            trade.exitType === 'STOP_LOSS' ? 'bg-danger' : 
-                                            trade.exitType === 'MKT_CLOSE' ? 'bg-secondary' : 'bg-warning'
-                                          }`}>
-                                            {trade.exitType === 'MKT_CLOSE' ? 'Market Close' : trade.exitType}
-                                          </span>
-                                        ) : '-'}
-                                      </td>
-                                      <td>
-                                        {trade.pnl !== null ? (
-                                          <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
-                                            {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
-                                          </span>
-                                        ) : '-'}
-                                      </td>
-                                      <td>
-                                        {trade.pnlPercent !== null ? (
-                                          <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
-                                            {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
-                                          </span>
-                                        ) : '-'}
-                                      </td>
-                                      <td>
-                                        <span className={`badge ${trade.exitTime ? 'bg-success' : 'bg-warning'}`}>
-                                          {trade.exitTime ? 'Closed' : 'Open'}
-                                        </span>
-                                      </td>
-                                    </tr>
-                                  ))}
+                                  {isExpanded && (
+                                    <>
+                                      {dateTrades.map((trade, tradeIndex) => (
+                                        <tr key={`${dateKey}-${tradeIndex}`} className="table-light">
+                                          <td></td>
+                                          <td>{dateIndex * 1000 + tradeIndex + 1}</td>
+                                          <td>{new Date(trade.date).toLocaleDateString()}</td>
+                                          <td>{new Date(trade.signalTime).toLocaleTimeString()}</td>
+                                          <td>
+                                            <span className={`badge ${trade.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                                              {trade.signalType}
+                                            </span>
+                                          </td>
+                                          <td>{new Date(trade.entryTime).toLocaleTimeString()}</td>
+                                          <td>{trade.entryPrice.toFixed(2)}</td>
+                                          <td>{trade.exitTime ? new Date(trade.exitTime).toLocaleTimeString() : '-'}</td>
+                                          <td>{trade.exitPrice ? trade.exitPrice.toFixed(2) : '-'}</td>
+                                          <td>
+                                            {trade.exitType ? (
+                                              <span className={`badge ${getExitBadgeClass(trade.exitType)}`}>
+                                                {getExitLabel(trade.exitType)}
+                                              </span>
+                                            ) : '-'}
+                                          </td>
+                                          <td>
+                                            {trade.pnl !== null ? (
+                                              <span className={`fw-bold ${trade.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+                                              </span>
+                                            ) : '-'}
+                                          </td>
+                                          <td>
+                                            {trade.pnlPercent !== null ? (
+                                              <span className={`fw-bold ${trade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                {trade.pnlPercent >= 0 ? '+' : ''}{trade.pnlPercent.toFixed(2)}%
+                                              </span>
+                                            ) : '-'}
+                                          </td>
+                                          <td>
+                                            <span className={`badge ${trade.exitTime ? 'bg-success' : 'bg-warning'}`}>
+                                              {trade.exitTime ? 'Closed' : 'Open'}
+                                            </span>
+                                          </td>
+                                        </tr>
+                                      ))}
+
+                                      {optionTradesForDate.length > 0 && (
+                                        <tr className="bg-white">
+                                          <td></td>
+                                          <td colSpan={12}>
+                                            <div className="p-3 border-top">
+                                              <div className="d-flex justify-content-between align-items-center mb-3">
+                                                <div className="fw-bold">
+                                                  Option Trades (Simulation)
+                                                  <span className="badge bg-secondary ms-2">
+                                                    {optionTradesForDate.length} trade{optionTradesForDate.length !== 1 ? 's' : ''}
+                                                  </span>
+                                                </div>
+                                                <div className={`fw-bold ${optionDateTotalPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                  Daily Option P&L: {optionDateTotalPnl >= 0 ? '+' : ''}{optionDateTotalPnl.toFixed(2)}
+                                                </div>
+                                              </div>
+                                              <div className="table-responsive">
+                                                <table className="table table-sm table-bordered align-middle mb-0">
+                                                  <thead className="table-light">
+                                                    <tr>
+                                                      <th>#</th>
+                                                      <th>Signal Time</th>
+                                                      <th>Option Symbol</th>
+                                                      <th>Lot Size</th>
+                                                      <th>ATM Strike</th>
+                                                      <th>Entry Premium</th>
+                                                      <th>Stop Loss</th>
+                                                      <th>Target</th>
+                                                      <th>Exit Time</th>
+                                                      <th>Exit Premium</th>
+                                                      <th>Exit Type</th>
+                                                      <th>P&L</th>
+                                                      <th>P&L %</th>
+                                                      <th>Status</th>
+                                                    </tr>
+                                                  </thead>
+                                                  <tbody>
+                                                    {optionTradesForDate.map((optTrade, optIndex) => {
+                                                      const exitBadgeClass = getExitBadgeClass(optTrade.exitType || null);
+                                                      const pnlClass = optTrade.pnl !== null ? (optTrade.pnl >= 0 ? 'text-success' : 'text-danger') : '';
+                                                      return (
+                                                        <tr key={`option-${dateKey}-${optIndex}`}>
+                                                          <td>{optIndex + 1}</td>
+                                                          <td>{optTrade.signalTime ? new Date(optTrade.signalTime).toLocaleTimeString() : '-'}</td>
+                                                          <td>{optTrade.optionSymbol ?? '-'}</td>
+                                                          <td>{optTrade.lotSize ?? '-'}</td>
+                                                          <td>{optTrade.atmStrike !== null ? optTrade.atmStrike.toFixed(0) : '-'}</td>
+                                                          <td>{optTrade.optionEntryPrice !== null ? optTrade.optionEntryPrice.toFixed(2) : '-'}</td>
+                                                          <td>{optTrade.stopLossPrice !== null ? optTrade.stopLossPrice.toFixed(2) : '-'}</td>
+                                                          <td>{optTrade.targetPrice !== null ? optTrade.targetPrice.toFixed(2) : '-'}</td>
+                                                          <td>{optTrade.exitTime ? new Date(optTrade.exitTime).toLocaleTimeString() : '-'}</td>
+                                                          <td>{optTrade.optionExitPrice !== null ? optTrade.optionExitPrice.toFixed(2) : '-'}</td>
+                                                          <td>
+                                                            {optTrade.exitType ? (
+                                                              <span className={`badge ${exitBadgeClass}`}>
+                                                                {getExitLabel(optTrade.exitType)}
+                                                              </span>
+                                                            ) : (
+                                                              <span className="badge bg-warning">Open</span>
+                                                            )}
+                                                          </td>
+                                                          <td>
+                                                            {optTrade.pnl !== null ? (
+                                                              <span className={`fw-bold ${pnlClass}`}>
+                                                                {optTrade.pnl >= 0 ? '+' : ''}{optTrade.pnl.toFixed(2)}
+                                                              </span>
+                                                            ) : '-'}
+                                                          </td>
+                                                          <td>
+                                                            {optTrade.pnlPercent !== null ? (
+                                                              <span className={`fw-bold ${optTrade.pnlPercent >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                                {optTrade.pnlPercent >= 0 ? '+' : ''}{optTrade.pnlPercent.toFixed(2)}%
+                                                              </span>
+                                                            ) : '-'}
+                                                          </td>
+                                                          <td>
+                                                            <span className={`badge ${optTrade.status === 'closed' ? 'bg-success' : 'bg-warning'}`}>
+                                                              {optTrade.status === 'closed' ? 'Closed' : 'Open'}
+                                                            </span>
+                                                          </td>
+                                                        </tr>
+                                                      );
+                                                    })}
+                                                  </tbody>
+                                                </table>
+                                              </div>
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </>
+                                  )}
                                 </React.Fragment>
                               );
                             })}
@@ -1747,6 +2058,13 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                               <td colSpan={10} className="text-end">Total P&L ({(!filterPE || !filterCE) && 'Filtered'}):</td>
                               <td className={filteredTotalPnl >= 0 ? 'text-success' : 'text-danger'}>
                                 {filteredTotalPnl >= 0 ? '+' : ''}{filteredTotalPnl.toFixed(2)}
+                              </td>
+                              <td colSpan={2}></td>
+                            </tr>
+                            <tr className="table-warning fw-bold">
+                              <td colSpan={10} className="text-end">Total P&L (Option Contracts {(!filterPE || !filterCE) && 'Filtered'}):</td>
+                              <td className={optionFilteredTotalPnl >= 0 ? 'text-success' : 'text-danger'}>
+                                {optionFilteredTotalPnl >= 0 ? '+' : ''}{optionFilteredTotalPnl.toFixed(2)}
                               </td>
                               <td colSpan={2}></td>
                             </tr>

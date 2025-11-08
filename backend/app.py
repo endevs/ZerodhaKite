@@ -7,6 +7,7 @@ import logging
 import random
 import time
 from threading import Thread
+from typing import Dict
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
 from rules import load_mountain_signal_pe_rules
@@ -1359,6 +1360,76 @@ def api_backtest_mountain_signal():
         from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
         to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
 
+        try:
+            rules_data = load_mountain_signal_pe_rules()
+        except Exception as rules_error:
+            logging.error(f"Failed to load Mountain Signal PE rules for backtest: {rules_error}", exc_info=True)
+            rules_data = {
+                'option_trade': {
+                    'stop_loss_percent': -0.17,
+                    'target_percent': 0.45
+                },
+                'lot_sizes': {
+                    'BANKNIFTY': 35,
+                    'NIFTY': 75
+                },
+                'strike_rounding': {
+                    'BANKNIFTY': 100,
+                    'NIFTY': 50
+                },
+                'expiry_policy': {
+                    'BANKNIFTY': 'monthly',
+                    'NIFTY': 'weekly'
+                },
+                'evaluation': {
+                    'seconds_before_close': 20
+                },
+                'exit_priority': ['option_stop_loss', 'option_target', 'market_close 15:15', 'index_stop', 'index_target']
+            }
+
+        instrument_key = 'BANKNIFTY' if 'BANK' in instrument.upper() else 'NIFTY'
+
+        strike_rounding_map = {
+            key.upper(): int(value)
+            for key, value in (rules_data.get('strike_rounding') or {}).items()
+            if value is not None
+        }
+        lot_sizes_map = {
+            key.upper(): int(value)
+            for key, value in (rules_data.get('lot_sizes') or {}).items()
+            if value is not None
+        }
+        stop_loss_percent = rules_data.get('option_trade', {}).get('stop_loss_percent', -0.17)
+        target_percent = rules_data.get('option_trade', {}).get('target_percent', 0.45)
+
+        strike_step_default = 100 if instrument_key == 'BANKNIFTY' else 50
+        lot_size_default = 35 if instrument_key == 'BANKNIFTY' else 75
+
+        strike_step = strike_rounding_map.get(instrument_key, strike_step_default)
+        lot_size_value = lot_sizes_map.get(instrument_key, lot_size_default)
+
+        def round_to_atm(price: float) -> int:
+            if strike_step == 0:
+                return int(price)
+            return int(round(float(price) / strike_step) * strike_step)
+
+        def get_option_symbol(strike: int, option_type: str, candle_date: datetime.datetime) -> str:
+            symbol_prefix = 'BANKNIFTY' if instrument_key == 'BANKNIFTY' else 'NIFTY'
+            candle_dt = candle_date if isinstance(candle_date, datetime.datetime) else datetime.datetime.combine(candle_date, datetime.time.min)
+            year = candle_dt.year % 100
+            month_names = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+            month = month_names[candle_dt.month - 1]
+            return f"{symbol_prefix}{year:02d}{month}{int(strike)}{option_type}"
+
+        def simulate_option_premium(index_price: float, strike: float, option_type: str) -> float:
+            distance = abs(index_price - strike)
+            premium = 100.0
+            if option_type == 'PE':
+                premium += distance * 0.5 if strike > index_price else -distance * 0.3
+            else:
+                premium += distance * 0.5 if strike < index_price else -distance * 0.3
+            return max(10.0, premium)
+
         # Validate date range (max 30 days)
         days_diff = (to_date - from_date).days
         if days_diff > 30:
@@ -1431,6 +1502,9 @@ def api_backtest_mountain_signal():
         entry_price = 0
         exit_price = 0
         trades = []
+        option_trades = []
+        active_option_trade = None
+        option_trade_sequence = 0
         pe_signal_price_above_low = False
         ce_signal_price_below_high = False
         signal_candles_with_entry = set()
@@ -1520,10 +1594,57 @@ def api_backtest_mountain_signal():
                             'exit_type': None,
                             'pnl': None,
                             'pnl_percent': None,
-                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date']
+                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date'],
+                            'lot_size': lot_size_value,
+                            'option_trade_id': None,
+                            'option_symbol': None,
+                            'option_entry_price': None,
+                            'stop_loss_price': None,
+                            'target_price': None,
+                            'option_exit_price': None
                         })
                         consecutive_candles_for_target = 0
                         last_candle_high_less_than_ema = False
+
+                        trade_index = len(trades) - 1
+                        trade_date_value = trades[trade_index]['date']
+                        atm_strike = round_to_atm(entry_price)
+                        option_symbol = get_option_symbol(atm_strike, 'PE', current_candle['date'])
+                        option_entry_price = simulate_option_premium(entry_price, atm_strike, 'PE')
+                        stop_loss_price_abs = round(option_entry_price * (1 + stop_loss_percent), 2)
+                        target_price_abs = round(option_entry_price * (1 + target_percent), 2)
+
+                        option_trade = {
+                            'id': option_trade_sequence,
+                            'index_trade_index': trade_index,
+                            'signal_time': pe_signal_candle['date'],
+                            'signal_type': 'PE',
+                            'signal_high': float(pe_signal_candle['high']),
+                            'signal_low': float(pe_signal_candle['low']),
+                            'entry_time': current_candle['date'],
+                            'index_at_entry': float(entry_price),
+                            'atm_strike': float(atm_strike),
+                            'option_symbol': option_symbol,
+                            'option_entry_price': float(option_entry_price),
+                            'stop_loss_price': float(stop_loss_price_abs),
+                            'target_price': float(target_price_abs),
+                            'option_exit_price': None,
+                            'exit_time': None,
+                            'exit_type': None,
+                            'pnl': None,
+                            'pnl_percent': None,
+                            'status': 'open',
+                            'lot_size': lot_size_value,
+                            'date': trade_date_value
+                        }
+                        option_trades.append(option_trade)
+                        option_trade_sequence += 1
+                        trades[trade_index]['option_trade_id'] = option_trade['id']
+                        trades[trade_index]['option_symbol'] = option_symbol
+                        trades[trade_index]['option_entry_price'] = float(option_entry_price)
+                        trades[trade_index]['stop_loss_price'] = float(stop_loss_price_abs)
+                        trades[trade_index]['target_price'] = float(target_price_abs)
+                        active_option_trade = option_trade
 
                 # CE Entry
                 elif ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
@@ -1555,12 +1676,59 @@ def api_backtest_mountain_signal():
                             'exit_type': None,
                             'pnl': None,
                             'pnl_percent': None,
-                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date']
+                            'date': current_candle['date'].date() if isinstance(current_candle['date'], datetime.datetime) else current_candle['date'],
+                            'lot_size': lot_size_value,
+                            'option_trade_id': None,
+                            'option_symbol': None,
+                            'option_entry_price': None,
+                            'stop_loss_price': None,
+                            'target_price': None,
+                            'option_exit_price': None
                         })
                         consecutive_candles_for_target = 0
                         last_candle_low_greater_than_ema = False
 
-            # Exit Logic (Stop Loss and Target)
+                        trade_index = len(trades) - 1
+                        trade_date_value = trades[trade_index]['date']
+                        atm_strike = round_to_atm(entry_price)
+                        option_symbol = get_option_symbol(atm_strike, 'CE', current_candle['date'])
+                        option_entry_price = simulate_option_premium(entry_price, atm_strike, 'CE')
+                        stop_loss_price_abs = round(option_entry_price * (1 + stop_loss_percent), 2)
+                        target_price_abs = round(option_entry_price * (1 + target_percent), 2)
+
+                        option_trade = {
+                            'id': option_trade_sequence,
+                            'index_trade_index': trade_index,
+                            'signal_time': ce_signal_candle['date'],
+                            'signal_type': 'CE',
+                            'signal_high': float(ce_signal_candle['high']),
+                            'signal_low': float(ce_signal_candle['low']),
+                            'entry_time': current_candle['date'],
+                            'index_at_entry': float(entry_price),
+                            'atm_strike': float(atm_strike),
+                            'option_symbol': option_symbol,
+                            'option_entry_price': float(option_entry_price),
+                            'stop_loss_price': float(stop_loss_price_abs),
+                            'target_price': float(target_price_abs),
+                            'option_exit_price': None,
+                            'exit_time': None,
+                            'exit_type': None,
+                            'pnl': None,
+                            'pnl_percent': None,
+                            'status': 'open',
+                            'lot_size': lot_size_value,
+                            'date': trade_date_value
+                        }
+                        option_trades.append(option_trade)
+                        option_trade_sequence += 1
+                        trades[trade_index]['option_trade_id'] = option_trade['id']
+                        trades[trade_index]['option_symbol'] = option_symbol
+                        trades[trade_index]['option_entry_price'] = float(option_entry_price)
+                        trades[trade_index]['stop_loss_price'] = float(stop_loss_price_abs)
+                        trades[trade_index]['target_price'] = float(target_price_abs)
+                        active_option_trade = option_trade
+
+            # Exit Logic with DSL-driven priorities
             elif trade_placed:
                 candle_time_obj = current_candle['date']
                 if isinstance(candle_time_obj, datetime.datetime):
@@ -1568,59 +1736,187 @@ def api_backtest_mountain_signal():
                 else:
                     candle_time_check = datetime.datetime.now().time()
 
-                # Market Close Square Off (3:15 PM)
-                market_close_square_off_time = datetime.time(15, 15)
-                if market_close_square_off_time <= candle_time_check < datetime.time(15, 30):
-                    exit_price = current_candle['close']
-                    trades[-1]['exit_time'] = current_candle['date']
-                    trades[-1]['exit_price'] = exit_price
-                    trades[-1]['exit_type'] = 'MKT_CLOSE'
-                    if position == -1:  # PE
-                        pnl = (entry_price - exit_price) * 50
-                        pnl_percent = ((entry_price - exit_price) / entry_price) * 100
-                    else:  # CE
-                        pnl = (exit_price - entry_price) * 50
-                        pnl_percent = ((exit_price - entry_price) / entry_price) * 100
-                    trades[-1]['pnl'] = pnl
-                    trades[-1]['pnl_percent'] = pnl_percent
+                current_trade_index = len(trades) - 1
+                current_trade = trades[current_trade_index] if current_trade_index >= 0 else None
+
+                linked_option_trade = None
+                option_exit_price = None
+                option_exit_type = None
+                if active_option_trade and current_trade and current_trade.get('option_trade_id') == active_option_trade.get('id'):
+                    linked_option_trade = active_option_trade
+                    option_exit_price = simulate_option_premium(
+                        current_candle['close'],
+                        linked_option_trade['atm_strike'],
+                        linked_option_trade['signal_type']
+                    )
+                    if option_exit_price <= linked_option_trade['stop_loss_price']:
+                        option_exit_type = 'OPTION_STOP_LOSS'
+                    elif option_exit_price >= linked_option_trade['target_price']:
+                        option_exit_type = 'OPTION_TARGET'
+
+                if option_exit_type and current_trade:
+                    lot_size_for_trade = current_trade.get('lot_size', lot_size_value)
+                    entry_price_value = current_trade['entry_price']
+                    exit_price_value = current_candle['close']
+                    if position == -1:
+                        pnl_val = (entry_price_value - exit_price_value) * lot_size_for_trade
+                        pnl_percent_val = ((entry_price_value - exit_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                    else:
+                        pnl_val = (exit_price_value - entry_price_value) * lot_size_for_trade
+                        pnl_percent_val = ((exit_price_value - entry_price_value) / entry_price_value) * 100 if entry_price_value else 0
+
+                    current_trade['exit_time'] = current_candle['date']
+                    current_trade['exit_price'] = exit_price_value
+                    current_trade['exit_type'] = option_exit_type
+                    current_trade['pnl'] = pnl_val
+                    current_trade['pnl_percent'] = pnl_percent_val
+                    current_trade['option_exit_price'] = option_exit_price
+
+                    if linked_option_trade:
+                        entry_opt_price = linked_option_trade.get('option_entry_price')
+                        lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                        linked_option_trade['option_exit_price'] = option_exit_price
+                        linked_option_trade['exit_time'] = current_candle['date']
+                        linked_option_trade['exit_type'] = option_exit_type
+                        if entry_opt_price:
+                            linked_option_trade['pnl'] = (option_exit_price - entry_opt_price) * lot_size_opt
+                            linked_option_trade['pnl_percent'] = ((option_exit_price - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                        linked_option_trade['status'] = 'closed'
+                        active_option_trade = None
+
                     trade_placed = False
                     position = 0
                     active_trade_signal_candle = None
+                    consecutive_candles_for_target = 0
+                    if current_trade['signal_type'] == 'PE':
+                        pe_signal_price_above_low = False
+                        last_candle_high_less_than_ema = False
+                    else:
+                        ce_signal_price_below_high = False
+                        last_candle_low_greater_than_ema = False
                     continue
 
-                # PE Exit Logic
-                if position == -1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'PE':  # PE trade
-                    # Stop Loss
+                if current_trade:
+                    market_close_square_off_time = datetime.time(15, 15)
+                    if market_close_square_off_time <= candle_time_check < datetime.time(15, 30):
+                        lot_size_for_trade = current_trade.get('lot_size', lot_size_value)
+                        entry_price_value = current_trade['entry_price']
+                        exit_price_value = current_candle['close']
+                        if position == -1:
+                            pnl_val = (entry_price_value - exit_price_value) * lot_size_for_trade
+                            pnl_percent_val = ((entry_price_value - exit_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                        else:
+                            pnl_val = (exit_price_value - entry_price_value) * lot_size_for_trade
+                            pnl_percent_val = ((exit_price_value - entry_price_value) / entry_price_value) * 100 if entry_price_value else 0
+
+                        option_exit_price_mc = None
+                        if linked_option_trade:
+                            option_exit_price_mc = simulate_option_premium(
+                                current_candle['close'],
+                                linked_option_trade['atm_strike'],
+                                linked_option_trade['signal_type']
+                            )
+                            entry_opt_price = linked_option_trade.get('option_entry_price')
+                            lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                            linked_option_trade['option_exit_price'] = option_exit_price_mc
+                            linked_option_trade['exit_time'] = current_candle['date']
+                            linked_option_trade['exit_type'] = 'MARKET_CLOSE'
+                            if entry_opt_price:
+                                linked_option_trade['pnl'] = (option_exit_price_mc - entry_opt_price) * lot_size_opt
+                                linked_option_trade['pnl_percent'] = ((option_exit_price_mc - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                            linked_option_trade['status'] = 'closed'
+                            active_option_trade = None
+
+                        current_trade['exit_time'] = current_candle['date']
+                        current_trade['exit_price'] = exit_price_value
+                        current_trade['exit_type'] = 'MKT_CLOSE'
+                        current_trade['pnl'] = pnl_val
+                        current_trade['pnl_percent'] = pnl_percent_val
+                        current_trade['option_exit_price'] = option_exit_price_mc
+
+                        trade_placed = False
+                        position = 0
+                        active_trade_signal_candle = None
+                        consecutive_candles_for_target = 0
+                        if current_trade['signal_type'] == 'PE':
+                            pe_signal_price_above_low = False
+                            last_candle_high_less_than_ema = False
+                        else:
+                            ce_signal_price_below_high = False
+                            last_candle_low_greater_than_ema = False
+                        continue
+
+                if position == -1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'PE':
+                    lot_size_for_trade = current_trade.get('lot_size', lot_size_value) if current_trade else lot_size_value
+                    entry_price_value = current_trade['entry_price'] if current_trade else 0
+
                     if current_candle['close'] > active_trade_signal_candle['high']:
-                        exit_price = current_candle['close']
-                        trades[-1]['exit_time'] = current_candle['date']
-                        trades[-1]['exit_price'] = exit_price
-                        trades[-1]['exit_type'] = 'STOP_LOSS'
-                        pnl = (entry_price - exit_price) * 50
-                        pnl_percent = ((entry_price - exit_price) / entry_price) * 100
-                        trades[-1]['pnl'] = pnl
-                        trades[-1]['pnl_percent'] = pnl_percent
+                        exit_price_value = current_candle['close']
+                        pnl_val = (entry_price_value - exit_price_value) * lot_size_for_trade
+                        pnl_percent_val = ((entry_price_value - exit_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                        option_exit_price_idx = None
+                        if linked_option_trade:
+                            option_exit_price_idx = simulate_option_premium(
+                                current_candle['close'],
+                                linked_option_trade['atm_strike'],
+                                linked_option_trade['signal_type']
+                            )
+                            entry_opt_price = linked_option_trade.get('option_entry_price')
+                            lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                            linked_option_trade['option_exit_price'] = option_exit_price_idx
+                            linked_option_trade['exit_time'] = current_candle['date']
+                            linked_option_trade['exit_type'] = 'INDEX_STOP'
+                            if entry_opt_price:
+                                linked_option_trade['pnl'] = (option_exit_price_idx - entry_opt_price) * lot_size_opt
+                                linked_option_trade['pnl_percent'] = ((option_exit_price_idx - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                            linked_option_trade['status'] = 'closed'
+                            active_option_trade = None
+
+                        current_trade['exit_time'] = current_candle['date']
+                        current_trade['exit_price'] = exit_price_value
+                        current_trade['exit_type'] = 'INDEX_STOP'
+                        current_trade['pnl'] = pnl_val
+                        current_trade['pnl_percent'] = pnl_percent_val
+                        current_trade['option_exit_price'] = option_exit_price_idx
                         trade_placed = False
                         position = 0
                         active_trade_signal_candle = None
                         pe_signal_price_above_low = False
                         consecutive_candles_for_target = 0
                         last_candle_high_less_than_ema = False
-                    # Target
                     elif current_candle['high'] < current_ema:
                         last_candle_high_less_than_ema = True
                         consecutive_candles_for_target = 0
                     elif last_candle_high_less_than_ema and current_candle['close'] > current_ema:
                         consecutive_candles_for_target += 1
                         if consecutive_candles_for_target >= 2:
-                            exit_price = current_candle['close']
-                            trades[-1]['exit_time'] = current_candle['date']
-                            trades[-1]['exit_price'] = exit_price
-                            trades[-1]['exit_type'] = 'TARGET'
-                            pnl = (entry_price - exit_price) * 50
-                            pnl_percent = ((entry_price - exit_price) / entry_price) * 100
-                            trades[-1]['pnl'] = pnl
-                            trades[-1]['pnl_percent'] = pnl_percent
+                            exit_price_value = current_candle['close']
+                            pnl_val = (entry_price_value - exit_price_value) * lot_size_for_trade
+                            pnl_percent_val = ((entry_price_value - exit_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                            option_exit_price_idx = None
+                            if linked_option_trade:
+                                option_exit_price_idx = simulate_option_premium(
+                                    current_candle['close'],
+                                    linked_option_trade['atm_strike'],
+                                    linked_option_trade['signal_type']
+                                )
+                                entry_opt_price = linked_option_trade.get('option_entry_price')
+                                lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                                linked_option_trade['option_exit_price'] = option_exit_price_idx
+                                linked_option_trade['exit_time'] = current_candle['date']
+                                linked_option_trade['exit_type'] = 'INDEX_TARGET'
+                                if entry_opt_price:
+                                    linked_option_trade['pnl'] = (option_exit_price_idx - entry_opt_price) * lot_size_opt
+                                    linked_option_trade['pnl_percent'] = ((option_exit_price_idx - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                                linked_option_trade['status'] = 'closed'
+                                active_option_trade = None
+
+                            current_trade['exit_time'] = current_candle['date']
+                            current_trade['exit_price'] = exit_price_value
+                            current_trade['exit_type'] = 'INDEX_TARGET'
+                            current_trade['pnl'] = pnl_val
+                            current_trade['pnl_percent'] = pnl_percent_val
+                            current_trade['option_exit_price'] = option_exit_price_idx
                             trade_placed = False
                             position = 0
                             active_trade_signal_candle = None
@@ -1628,45 +1924,134 @@ def api_backtest_mountain_signal():
                             consecutive_candles_for_target = 0
                             last_candle_high_less_than_ema = False
 
-                # CE Exit Logic
-                elif position == 1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'CE':  # CE trade
-                    # Stop Loss
+                elif position == 1 and active_trade_signal_candle is not None and active_trade_signal_candle['type'] == 'CE':
+                    lot_size_for_trade = current_trade.get('lot_size', lot_size_value) if current_trade else lot_size_value
+                    entry_price_value = current_trade['entry_price'] if current_trade else 0
+
                     if current_candle['close'] < active_trade_signal_candle['low']:
-                        exit_price = current_candle['close']
-                        trades[-1]['exit_time'] = current_candle['date']
-                        trades[-1]['exit_price'] = exit_price
-                        trades[-1]['exit_type'] = 'STOP_LOSS'
-                        pnl = (exit_price - entry_price) * 50
-                        pnl_percent = ((exit_price - entry_price) / entry_price) * 100
-                        trades[-1]['pnl'] = pnl
-                        trades[-1]['pnl_percent'] = pnl_percent
+                        exit_price_value = current_candle['close']
+                        pnl_val = (exit_price_value - entry_price_value) * lot_size_for_trade
+                        pnl_percent_val = ((exit_price_value - entry_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                        option_exit_price_idx = None
+                        if linked_option_trade:
+                            option_exit_price_idx = simulate_option_premium(
+                                current_candle['close'],
+                                linked_option_trade['atm_strike'],
+                                linked_option_trade['signal_type']
+                            )
+                            entry_opt_price = linked_option_trade.get('option_entry_price')
+                            lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                            linked_option_trade['option_exit_price'] = option_exit_price_idx
+                            linked_option_trade['exit_time'] = current_candle['date']
+                            linked_option_trade['exit_type'] = 'INDEX_STOP'
+                            if entry_opt_price:
+                                linked_option_trade['pnl'] = (option_exit_price_idx - entry_opt_price) * lot_size_opt
+                                linked_option_trade['pnl_percent'] = ((option_exit_price_idx - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                            linked_option_trade['status'] = 'closed'
+                            active_option_trade = None
+
+                        current_trade['exit_time'] = current_candle['date']
+                        current_trade['exit_price'] = exit_price_value
+                        current_trade['exit_type'] = 'INDEX_STOP'
+                        current_trade['pnl'] = pnl_val
+                        current_trade['pnl_percent'] = pnl_percent_val
+                        current_trade['option_exit_price'] = option_exit_price_idx
                         trade_placed = False
                         position = 0
                         active_trade_signal_candle = None
                         ce_signal_price_below_high = False
                         consecutive_candles_for_target = 0
                         last_candle_low_greater_than_ema = False
-                    # Target
                     elif current_candle['low'] > current_ema:
                         last_candle_low_greater_than_ema = True
                         consecutive_candles_for_target = 0
                     elif last_candle_low_greater_than_ema and current_candle['close'] < current_ema:
                         consecutive_candles_for_target += 1
                         if consecutive_candles_for_target >= 2:
-                            exit_price = current_candle['close']
-                            trades[-1]['exit_time'] = current_candle['date']
-                            trades[-1]['exit_price'] = exit_price
-                            trades[-1]['exit_type'] = 'TARGET'
-                            pnl = (exit_price - entry_price) * 50
-                            pnl_percent = ((exit_price - entry_price) / entry_price) * 100
-                            trades[-1]['pnl'] = pnl
-                            trades[-1]['pnl_percent'] = pnl_percent
+                            exit_price_value = current_candle['close']
+                            pnl_val = (exit_price_value - entry_price_value) * lot_size_for_trade
+                            pnl_percent_val = ((exit_price_value - entry_price_value) / entry_price_value) * 100 if entry_price_value else 0
+                            option_exit_price_idx = None
+                            if linked_option_trade:
+                                option_exit_price_idx = simulate_option_premium(
+                                    current_candle['close'],
+                                    linked_option_trade['atm_strike'],
+                                    linked_option_trade['signal_type']
+                                )
+                                entry_opt_price = linked_option_trade.get('option_entry_price')
+                                lot_size_opt = linked_option_trade.get('lot_size', lot_size_for_trade)
+                                linked_option_trade['option_exit_price'] = option_exit_price_idx
+                                linked_option_trade['exit_time'] = current_candle['date']
+                                linked_option_trade['exit_type'] = 'INDEX_TARGET'
+                                if entry_opt_price:
+                                    linked_option_trade['pnl'] = (option_exit_price_idx - entry_opt_price) * lot_size_opt
+                                    linked_option_trade['pnl_percent'] = ((option_exit_price_idx - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                                linked_option_trade['status'] = 'closed'
+                                active_option_trade = None
+
+                            current_trade['exit_time'] = current_candle['date']
+                            current_trade['exit_price'] = exit_price_value
+                            current_trade['exit_type'] = 'INDEX_TARGET'
+                            current_trade['pnl'] = pnl_val
+                            current_trade['pnl_percent'] = pnl_percent_val
+                            current_trade['option_exit_price'] = option_exit_price_idx
                             trade_placed = False
                             position = 0
                             active_trade_signal_candle = None
                             ce_signal_price_below_high = False
                             consecutive_candles_for_target = 0
                             last_candle_low_greater_than_ema = False
+
+        # Force-close any remaining open trade at the end of the dataset
+        if trade_placed and trades:
+            last_trade = trades[-1]
+            last_candle = df.iloc[-1]
+            exit_price_value = last_candle['close']
+            lot_size_for_trade = last_trade.get('lot_size', lot_size_value)
+            entry_price_value = last_trade['entry_price']
+            if position == -1:
+                pnl_val = (entry_price_value - exit_price_value) * lot_size_for_trade
+                pnl_percent_val = ((entry_price_value - exit_price_value) / entry_price_value) * 100 if entry_price_value else 0
+            else:
+                pnl_val = (exit_price_value - entry_price_value) * lot_size_for_trade
+                pnl_percent_val = ((exit_price_value - entry_price_value) / entry_price_value) * 100 if entry_price_value else 0
+
+            option_exit_price_forced = None
+            if active_option_trade and last_trade.get('option_trade_id') == active_option_trade.get('id'):
+                option_exit_price_forced = simulate_option_premium(
+                    exit_price_value,
+                    active_option_trade['atm_strike'],
+                    active_option_trade['signal_type']
+                )
+                entry_opt_price = active_option_trade.get('option_entry_price')
+                lot_size_opt = active_option_trade.get('lot_size', lot_size_for_trade)
+                active_option_trade['option_exit_price'] = option_exit_price_forced
+                active_option_trade['exit_time'] = last_candle['date']
+                active_option_trade['exit_type'] = 'FORCED_CLOSE'
+                if entry_opt_price:
+                    active_option_trade['pnl'] = (option_exit_price_forced - entry_opt_price) * lot_size_opt
+                    active_option_trade['pnl_percent'] = ((option_exit_price_forced - entry_opt_price) / entry_opt_price) * 100 if entry_opt_price else None
+                active_option_trade['status'] = 'closed'
+                active_option_trade = None
+
+            last_trade['exit_time'] = last_candle['date']
+            last_trade['exit_price'] = exit_price_value
+            last_trade['exit_type'] = 'FORCED_CLOSE'
+            last_trade['pnl'] = pnl_val
+            last_trade['pnl_percent'] = pnl_percent_val
+            last_trade['option_exit_price'] = option_exit_price_forced
+            trade_placed = False
+            position = 0
+            active_trade_signal_candle = None
+            pe_signal_price_above_low = False
+            ce_signal_price_below_high = False
+            consecutive_candles_for_target = 0
+            last_candle_high_less_than_ema = False
+            last_candle_low_greater_than_ema = False
+
+        if active_option_trade and active_option_trade.get('status') != 'closed':
+            active_option_trade['status'] = 'open'
+            active_option_trade = None
 
         # Calculate summary metrics
         closed_trades = [t for t in trades if t['exit_time'] is not None]
@@ -1676,6 +2061,14 @@ def api_backtest_mountain_signal():
         win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
         total_pnl = sum([t['pnl'] for t in closed_trades if t['pnl'] is not None])
         average_pnl = total_pnl / total_trades if total_trades > 0 else 0
+
+        option_closed_trades = [ot for ot in option_trades if ot.get('exit_time') is not None]
+        option_total_trades = len(option_closed_trades)
+        option_winning_trades = len([ot for ot in option_closed_trades if ot.get('pnl') and ot['pnl'] > 0])
+        option_losing_trades = len([ot for ot in option_closed_trades if ot.get('pnl') and ot['pnl'] <= 0])
+        option_win_rate = (option_winning_trades / option_total_trades * 100) if option_total_trades > 0 else 0
+        option_total_pnl = sum([ot['pnl'] for ot in option_closed_trades if ot.get('pnl') is not None])
+        option_average_pnl = option_total_pnl / option_total_trades if option_total_trades > 0 else 0
 
         # Calculate Max Drawdown
         cumulative_pnl = 0
@@ -1718,6 +2111,27 @@ def api_backtest_mountain_signal():
             if pnl < max_losing_day['pnl']:
                 max_losing_day = {'date': date_key, 'pnl': pnl}
 
+        option_daily_pnl: Dict[str, float] = {}
+        for opt_trade in option_closed_trades:
+            pnl_val = opt_trade.get('pnl')
+            if pnl_val is None:
+                continue
+            opt_date = opt_trade.get('date')
+            if isinstance(opt_date, datetime.date):
+                opt_date_key = opt_date.isoformat()
+            else:
+                opt_date_key = str(opt_date)
+            option_daily_pnl.setdefault(opt_date_key, 0.0)
+            option_daily_pnl[opt_date_key] += pnl_val
+
+        option_max_winning_day = {'date': from_date_str, 'pnl': 0}
+        option_max_losing_day = {'date': from_date_str, 'pnl': 0}
+        for date_key, pnl in option_daily_pnl.items():
+            if pnl > option_max_winning_day['pnl']:
+                option_max_winning_day = {'date': date_key, 'pnl': pnl}
+            if pnl < option_max_losing_day['pnl']:
+                option_max_losing_day = {'date': date_key, 'pnl': pnl}
+
         # Format trades for response
         formatted_trades = []
         for trade in trades:
@@ -1733,12 +2147,46 @@ def api_backtest_mountain_signal():
                 'exitType': trade['exit_type'],
                 'pnl': float(trade['pnl']) if trade['pnl'] is not None else None,
                 'pnlPercent': float(trade['pnl_percent']) if trade['pnl_percent'] is not None else None,
-                'date': trade['date'].isoformat() if isinstance(trade['date'], datetime.date) else str(trade['date'])
+                'date': trade['date'].isoformat() if isinstance(trade['date'], datetime.date) else str(trade['date']),
+                'lotSize': int(trade['lot_size']) if trade.get('lot_size') is not None else None,
+                'optionTradeId': trade.get('option_trade_id'),
+                'optionSymbol': trade.get('option_symbol'),
+                'optionEntryPrice': float(trade['option_entry_price']) if trade.get('option_entry_price') is not None else None,
+                'stopLossPrice': float(trade['stop_loss_price']) if trade.get('stop_loss_price') is not None else None,
+                'targetPrice': float(trade['target_price']) if trade.get('target_price') is not None else None,
+                'optionExitPrice': float(trade['option_exit_price']) if trade.get('option_exit_price') is not None else None
+            })
+
+        formatted_option_trades = []
+        for opt_trade in option_trades:
+            formatted_option_trades.append({
+                'id': opt_trade.get('id'),
+                'indexTradeIndex': opt_trade.get('index_trade_index'),
+                'signalTime': opt_trade.get('signal_time').isoformat() if isinstance(opt_trade.get('signal_time'), datetime.datetime) else str(opt_trade.get('signal_time')),
+                'signalType': opt_trade.get('signal_type'),
+                'signalHigh': float(opt_trade.get('signal_high')) if opt_trade.get('signal_high') is not None else None,
+                'signalLow': float(opt_trade.get('signal_low')) if opt_trade.get('signal_low') is not None else None,
+                'entryTime': opt_trade.get('entry_time').isoformat() if isinstance(opt_trade.get('entry_time'), datetime.datetime) else str(opt_trade.get('entry_time')),
+                'indexAtEntry': float(opt_trade.get('index_at_entry')) if opt_trade.get('index_at_entry') is not None else None,
+                'atmStrike': float(opt_trade.get('atm_strike')) if opt_trade.get('atm_strike') is not None else None,
+                'optionSymbol': opt_trade.get('option_symbol'),
+                'optionEntryPrice': float(opt_trade.get('option_entry_price')) if opt_trade.get('option_entry_price') is not None else None,
+                'stopLossPrice': float(opt_trade.get('stop_loss_price')) if opt_trade.get('stop_loss_price') is not None else None,
+                'targetPrice': float(opt_trade.get('target_price')) if opt_trade.get('target_price') is not None else None,
+                'optionExitPrice': float(opt_trade.get('option_exit_price')) if opt_trade.get('option_exit_price') is not None else None,
+                'exitTime': opt_trade.get('exit_time').isoformat() if isinstance(opt_trade.get('exit_time'), datetime.datetime) else str(opt_trade.get('exit_time')) if opt_trade.get('exit_time') else None,
+                'exitType': opt_trade.get('exit_type'),
+                'pnl': float(opt_trade.get('pnl')) if opt_trade.get('pnl') is not None else None,
+                'pnlPercent': float(opt_trade.get('pnl_percent')) if opt_trade.get('pnl_percent') is not None else None,
+                'status': opt_trade.get('status'),
+                'lotSize': int(opt_trade.get('lot_size')) if opt_trade.get('lot_size') is not None else None,
+                'date': opt_trade.get('date').isoformat() if isinstance(opt_trade.get('date'), datetime.date) else str(opt_trade.get('date'))
             })
 
         return jsonify({
             'status': 'success',
             'trades': formatted_trades,
+            'optionTrades': formatted_option_trades,
             'summary': {
                 'totalTrades': total_trades,
                 'winningTrades': winning_trades,
@@ -1750,6 +2198,16 @@ def api_backtest_mountain_signal():
                 'maxDrawdownPercent': round(max_drawdown_percent, 2),
                 'maxWinningDay': max_winning_day,
                 'maxLosingDay': max_losing_day
+            },
+            'optionSummary': {
+                'totalTrades': option_total_trades,
+                'winningTrades': option_winning_trades,
+                'losingTrades': option_losing_trades,
+                'winRate': round(option_win_rate, 2),
+                'totalPnl': round(option_total_pnl, 2),
+                'averagePnl': round(option_average_pnl, 2),
+                'maxWinningDay': option_max_winning_day,
+                'maxLosingDay': option_max_losing_day
             }
         })
 
