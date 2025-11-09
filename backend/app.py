@@ -78,6 +78,36 @@ def ensure_datetime(value: Any) -> datetime.datetime:
     return datetime.datetime.now()
 
 
+def _parse_iso_date(value: Optional[str]) -> Optional[datetime.date]:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _fetch_candles_for_range(instrument_token: int, start_date: datetime.date, end_date: datetime.date, interval: str = "5minute") -> List[Dict[str, Any]]:
+    candles: List[Dict[str, Any]] = []
+    current_date = start_date
+    total_days = (end_date - start_date).days + 1
+    processed = 0
+    while current_date <= end_date:
+        start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+        end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+        try:
+            hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            if hist:
+                candles.extend(hist)
+        except Exception as exc:
+            logging.warning(f"[RL] Historical fetch failed for {current_date}: {exc}")
+        current_date += datetime.timedelta(days=1)
+        processed += 1
+        if processed % 50 == 0 or current_date > end_date:
+            logging.info(f"[RL] Fetch progress: {processed}/{total_days} days, candles collected: {len(candles)}")
+    return candles
+
+
 def compute_drawdown_metrics(trades: List[Dict[str, Any]], initial_capital: float) -> Tuple[float, float, float]:
     if initial_capital <= 0:
         return 0.0, 0.0, 0.0
@@ -5595,37 +5625,30 @@ def api_rl_train():
         episodes = int(data.get('episodes', 100))
         epsilon = float(data.get('epsilon', 1.0))
         epsilon_decay = float(data.get('epsilon_decay', 0.995))
+        train_start_raw = data.get('train_start')
+        train_end_raw = data.get('train_end')
+        train_start = _parse_iso_date(train_start_raw)
+        train_end = _parse_iso_date(train_end_raw)
         
         token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
         if symbol not in token_map:
             return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
         instrument_token = token_map[symbol]
         
-        # Fetch 3 years of 5-minute data
-        end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(days=365 * years)
-        all_candles = []
-        current_date = start_date
-        interval = '5minute'
-        total_days = (end_date - start_date).days + 1
-        day_index = 0
+        if train_start and train_end:
+            if train_end < train_start:
+                return jsonify({'status': 'error', 'message': 'train_end cannot be before train_start'}), 400
+            start_date = train_start
+            end_date = train_end
+            logging.info(f"[RL] Training request: symbol={symbol}, train_start={start_date}, train_end={end_date}, episodes={episodes}")
+            print(f"[RL] Training request: symbol={symbol}, train_start={start_date}, train_end={end_date}, episodes={episodes}", flush=True)
+        else:
+            end_date = datetime.date.today()
+            start_date = end_date - datetime.timedelta(days=365 * years)
+            logging.info(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}")
+            print(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}", flush=True)
         
-        logging.info(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}")
-        print(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}", flush=True)
-        
-        while current_date <= end_date:
-            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
-            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
-            try:
-                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
-                if hist:
-                    all_candles.extend(hist)
-            except Exception as e:
-                logging.warning(f"Historical fetch failed for {current_date}: {e}")
-            current_date += datetime.timedelta(days=1)
-            day_index += 1
-            if day_index % 50 == 0 or current_date > end_date:
-                logging.info(f"[RL] Fetch progress: {day_index}/{total_days} days, candles: {len(all_candles)}")
+        all_candles = _fetch_candles_for_range(instrument_token, start_date, end_date, interval='5minute')
         
         if len(all_candles) < 1000:
             return jsonify({'status': 'error', 'message': 'Insufficient data for RL training'}), 400
@@ -5644,7 +5667,13 @@ def api_rl_train():
         )
         duration = (datetime.datetime.now() - training_start_time).total_seconds()
         logging.info(f"[RL] Training complete in {duration:.2f}s. Model saved to {result.get('model_path')}")
-        return jsonify({'status': 'ok', 'symbol': symbol, **result})
+        return jsonify({
+            'status': 'ok',
+            'symbol': symbol,
+            'train_start': start_date.isoformat(),
+            'train_end': end_date.isoformat(),
+            **result
+        })
     except Exception as e:
         logging.error(f"Error in api_rl_train: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -5658,29 +5687,27 @@ def api_rl_evaluate():
     try:
         symbol = (request.args.get('symbol') or 'BANKNIFTY').upper()
         years = float(request.args.get('years', 0.5))  # Last 6 months for evaluation
+        eval_start_raw = request.args.get('start')
+        eval_end_raw = request.args.get('end')
+        eval_label = request.args.get('label')
+        eval_start = _parse_iso_date(eval_start_raw)
+        eval_end = _parse_iso_date(eval_end_raw)
         
         token_map = {'NIFTY': 256265, 'BANKNIFTY': 260105}
         if symbol not in token_map:
             return jsonify({'status': 'error', 'message': 'Unsupported symbol. Use NIFTY or BANKNIFTY'}), 400
         instrument_token = token_map[symbol]
         
-        # Fetch test data (last 6 months)
-        end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(days=int(365 * years))
-        all_candles = []
-        current_date = start_date
-        interval = '5minute'
+        if eval_start and eval_end:
+            if eval_end < eval_start:
+                return jsonify({'status': 'error', 'message': 'end date cannot be before start date'}), 400
+            start_date = eval_start
+            end_date = eval_end
+        else:
+            end_date = datetime.date.today()
+            start_date = end_date - datetime.timedelta(days=int(365 * years))
         
-        while current_date <= end_date:
-            start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
-            end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
-            try:
-                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
-                if hist:
-                    all_candles.extend(hist)
-            except Exception as e:
-                logging.warning(f"Historical fetch failed for {current_date}: {e}")
-            current_date += datetime.timedelta(days=1)
+        all_candles = _fetch_candles_for_range(instrument_token, start_date, end_date, interval='5minute')
         
         if len(all_candles) < 100:
             return jsonify({'status': 'error', 'message': 'Insufficient test data'}), 400
@@ -5695,7 +5722,8 @@ def api_rl_evaluate():
         payload = {
             'status': 'ok',
             'symbol': symbol,
-            'period': f'{years:.1f}y',
+            'period': f"{start_date.isoformat()} → {end_date.isoformat()}",
+            'label': eval_label or ('custom' if eval_start and eval_end else 'rolling'),
             'pnl': result.get('total_pnl'),
             'wins': result.get('winning_trades'),
             'losses': result.get('losing_trades'),
@@ -5709,6 +5737,11 @@ def api_rl_evaluate():
             'series': result.get('series', []),
             'split_index': result.get('split_index', 0),
             'initial_balance': result.get('initial_balance'),
+            'drawdown_series': result.get('drawdown_series', []),
+            'trade_points': result.get('trade_points', []),
+            'max_drawdown_abs': result.get('max_drawdown_abs'),
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
         }
         return jsonify(payload)
     except Exception as e:
