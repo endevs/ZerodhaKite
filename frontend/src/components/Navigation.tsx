@@ -11,6 +11,7 @@ const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, userNam
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
+    { id: 'live-trade', label: 'Live Trade', icon: '⚡' },
     { id: 'ai-ml', label: 'AI / ML', icon: '🤖' },
   ];
 

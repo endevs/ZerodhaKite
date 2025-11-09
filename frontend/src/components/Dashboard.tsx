@@ -7,6 +7,7 @@ import AlgoVisualizationContent from './AlgoVisualizationContent';
 import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
+import LiveTradeContent from './LiveTradeContent';
 
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -262,6 +263,8 @@ const Dashboard: React.FC = () => {
         );
       case 'algo-visualization':
         return <AlgoVisualizationContent />;
+      case 'live-trade':
+        return <LiveTradeContent />;
       case 'ai-ml':
         return <AIMLContent />;
       default:

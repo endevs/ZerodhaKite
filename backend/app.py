@@ -6,8 +6,8 @@ from kiteconnect import KiteConnect
 import logging
 import random
 import time
-from threading import Thread
-from typing import Dict, List, Tuple, Any
+from threading import Thread, Lock
+from typing import Dict, List, Tuple, Any, Optional
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
 from rules import load_mountain_signal_pe_rules
@@ -21,6 +21,20 @@ import datetime
 import secrets
 import config
 from database import get_db_connection
+from live_trade import (
+    ensure_live_trade_tables,
+    create_deployment as live_create_deployment,
+    get_deployment_for_user as live_get_deployment_for_user,
+    get_deployments_for_processing as live_get_deployments_for_processing,
+    update_deployment as live_update_deployment,
+    delete_deployment as live_delete_deployment,
+    append_state_message as live_append_state_message,
+    STATUS_SCHEDULED,
+    STATUS_ACTIVE,
+    STATUS_PAUSED,
+    STATUS_STOPPED,
+    STATUS_ERROR,
+)
 from chat import chat_bp
 from utils.backtest_metrics import calculate_all_metrics
 from ai_ml import train_lstm_on_candles, load_model_and_predict
@@ -747,6 +761,284 @@ socketio = SocketIO(app,
                     logger=False,  # Disable SocketIO verbose logging to reduce noise
                     engineio_logger=False)  # Disable EngineIO verbose logging to reduce noise
 
+# Ensure live trade tables exist on startup
+ensure_live_trade_tables()
+
+# Helper utilities for live trade feature
+def _get_user_record(user_id: int) -> Optional[sqlite3.Row]:
+    conn = get_db_connection()
+    try:
+        return conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _get_strategy_record(strategy_id: int, user_id: int) -> Optional[sqlite3.Row]:
+    conn = get_db_connection()
+    try:
+        return conn.execute(
+            'SELECT * FROM strategies WHERE id = ? AND user_id = ?',
+            (strategy_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _serialize_live_deployment(deployment: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not deployment:
+        return None
+
+    def _safe_iso(value: Any) -> Optional[str]:
+        if not value:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (datetime.datetime, datetime.date)):
+            return value.isoformat()
+        return str(value)
+
+    state = deployment.get('state') or {}
+    return {
+        'id': deployment.get('id'),
+        'userId': deployment.get('user_id'),
+        'strategyId': deployment.get('strategy_id'),
+        'strategyName': deployment.get('strategy_name'),
+        'status': deployment.get('status'),
+        'initialInvestment': deployment.get('initial_investment'),
+        'scheduledStart': _safe_iso(deployment.get('scheduled_start')),
+        'startedAt': _safe_iso(deployment.get('started_at')),
+        'lastRunAt': _safe_iso(deployment.get('last_run_at')),
+        'errorMessage': deployment.get('error_message'),
+        'state': state,
+        'createdAt': _safe_iso(deployment.get('created_at')),
+        'updatedAt': _safe_iso(deployment.get('updated_at')),
+    }
+
+
+def _sanitize_orders(raw_orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    fields = [
+        'order_id', 'status', 'tradingsymbol', 'transaction_type', 'quantity',
+        'filled_quantity', 'pending_quantity', 'price', 'trigger_price',
+        'average_price', 'exchange', 'product', 'order_type', 'variety',
+        'order_timestamp', 'exchange_timestamp'
+    ]
+    sanitized: List[Dict[str, Any]] = []
+    for order in raw_orders:
+        entry = {key: order.get(key) for key in fields if key in order}
+        sanitized.append(entry)
+    return sanitized
+
+
+def _sanitize_positions(raw_positions: Dict[str, Any]) -> List[Dict[str, Any]]:
+    positions: List[Dict[str, Any]] = []
+    if not raw_positions:
+        return positions
+    for pos in raw_positions.get('net', []):
+        positions.append({
+            'tradingsymbol': pos.get('tradingsymbol'),
+            'instrument_token': pos.get('instrument_token'),
+            'exchange': pos.get('exchange'),
+            'product': pos.get('product'),
+            'quantity': pos.get('quantity'),
+            'buy_quantity': pos.get('buy_quantity'),
+            'sell_quantity': pos.get('sell_quantity'),
+            'gross_quantity': pos.get('quantity'),
+            'buy_price': pos.get('buy_price'),
+            'sell_price': pos.get('sell_price'),
+            'last_price': pos.get('last_price'),
+            'pnl': pos.get('pnl'),
+            'm2m': pos.get('m2m'),
+        })
+    return positions
+
+
+def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datetime.datetime) -> None:
+    deployment_id = deployment['id']
+    user_id = deployment['user_id']
+    status = deployment.get('status', STATUS_SCHEDULED)
+    scheduled_raw = deployment.get('scheduled_start')
+    scheduled_dt = ensure_datetime(scheduled_raw) if scheduled_raw else None
+    state = deployment.get('state') or {}
+    state.setdefault('history', [])
+
+    if scheduled_dt and now < scheduled_dt:
+        state.update({
+            'phase': 'scheduled',
+            'message': f"Deployment scheduled for {scheduled_dt.isoformat()}",
+            'lastCheck': now.isoformat(),
+        })
+        live_update_deployment(
+            deployment_id,
+            state=state,
+            last_run_at=now
+        )
+        return
+
+    if status == STATUS_SCHEDULED:
+        state.setdefault('history', []).append({
+            'timestamp': now.isoformat(),
+            'level': 'info',
+            'message': f"Deployment activated at {now.isoformat()}",
+        })
+        state['phase'] = 'activating'
+        state['message'] = 'Deployment is now active.'
+        live_update_deployment(
+            deployment_id,
+            status=STATUS_ACTIVE,
+            state=state,
+            started_at=now,
+            last_run_at=now,
+            error_message=None
+        )
+        status = STATUS_ACTIVE
+
+    if status in {STATUS_PAUSED, STATUS_STOPPED}:
+        state.update({
+            'lastCheck': now.isoformat(),
+            'message': f"Deployment is {status}.",
+        })
+        live_update_deployment(
+            deployment_id,
+            state=state,
+            last_run_at=now
+        )
+        return
+
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        live_update_deployment(
+            deployment_id,
+            status=STATUS_ERROR,
+            state={
+                **state,
+                'phase': 'error',
+                'message': 'User record not found. Please configure Zerodha credentials.',
+                'lastCheck': now.isoformat(),
+            },
+            last_run_at=now,
+            error_message='Missing user record'
+        )
+        return
+
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    access_token = deployment.get('kite_access_token')
+
+    if not api_key or not access_token:
+        live_update_deployment(
+            deployment_id,
+            status=STATUS_ERROR,
+            state={
+                **state,
+                'phase': 'error',
+                'message': 'Missing Zerodha API credentials or access token.',
+                'lastCheck': now.isoformat(),
+            },
+            last_run_at=now,
+            error_message='Missing Zerodha credentials or access token'
+        )
+        return
+
+    try:
+        kite_client = KiteConnect(api_key=api_key)
+        kite_client.set_access_token(access_token)
+        margins = kite_client.margins()
+        orders = kite_client.orders()
+        positions = kite_client.positions()
+    except Exception as exc:
+        logging.exception("Live trade worker failed for deployment %s", deployment_id)
+        state.update({
+            'phase': 'error',
+            'message': f'Kite API error: {exc}',
+            'lastCheck': now.isoformat(),
+        })
+        live_update_deployment(
+            deployment_id,
+            status=STATUS_ERROR,
+            state=state,
+            last_run_at=now,
+            error_message=str(exc)
+        )
+        return
+
+    sanitized_orders = _sanitize_orders(orders if isinstance(orders, list) else [])
+    sanitized_positions = _sanitize_positions(positions if isinstance(positions, dict) else {})
+    open_positions = [pos for pos in sanitized_positions if pos.get('quantity')]
+
+    phase = 'monitoring'
+    message = 'Monitoring market conditions for entry signals.'
+    if open_positions:
+        phase = 'position_open'
+        message = 'Active position detected. Tracking live P&L.'
+
+    available_cash = None
+    try:
+        if isinstance(margins, dict):
+            equity = margins.get('equity') or {}
+            available = equity.get('available') or {}
+            available_cash = available.get('cash') or available.get('intraday') or available.get('adhoc_margin')
+    except Exception:
+        available_cash = None
+
+    total_pnl = 0.0
+    for pos in sanitized_positions:
+        try:
+            pnl = pos.get('pnl')
+            if pnl is not None:
+                total_pnl += float(pnl)
+        except (TypeError, ValueError):
+            continue
+
+    state.update({
+        'phase': phase,
+        'message': message,
+        'lastCheck': now.isoformat(),
+        'orders': sanitized_orders,
+        'positions': sanitized_positions,
+        'margin': {
+            'availableCash': available_cash,
+            'snapshot': margins if isinstance(margins, dict) else None,
+        },
+        'livePnl': total_pnl,
+    })
+
+    live_update_deployment(
+        deployment_id,
+        status=STATUS_ACTIVE,
+        state=state,
+        last_run_at=now,
+        error_message=None
+    )
+
+
+def process_live_trade_deployments() -> None:
+    if not live_trade_lock.acquire(blocking=False):
+        return
+    try:
+        now = datetime.datetime.utcnow()
+        deployments = live_get_deployments_for_processing(now)
+        if not deployments:
+            return
+        for deployment in deployments:
+            try:
+                _process_single_live_trade_deployment(deployment, now)
+            except Exception as exc:
+                logging.exception("Unhandled error processing live deployment %s", deployment.get('id'))
+                state = deployment.get('state') or {}
+                state.update({
+                    'phase': 'error',
+                    'message': f'Unhandled worker error: {exc}',
+                    'lastCheck': now.isoformat(),
+                })
+                live_update_deployment(
+                    deployment['id'],
+                    status=STATUS_ERROR,
+                    state=state,
+                    last_run_at=now,
+                    error_message=str(exc)
+                )
+    finally:
+        live_trade_lock.release()
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # Scheduler for automatic data collection
@@ -769,6 +1061,7 @@ def stop_data_collection():
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=start_data_collection, trigger="cron", day_of_week='mon-fri', hour=9, minute=15)
 scheduler.add_job(func=stop_data_collection, trigger="cron", day_of_week='mon-fri', hour=15, minute=30)
+scheduler.add_job(func=process_live_trade_deployments, trigger="interval", seconds=30, max_instances=1)
 scheduler.start()
 
 @app.before_request
@@ -815,6 +1108,9 @@ paper_trade_strategies = {}  # Store paper trade strategy instances
 
 # Ticker instance
 ticker = None
+
+# Synchronization lock for live trade scheduler
+live_trade_lock = Lock()
 
 # Initialize paper trade tables on startup
 def init_paper_trade_tables():
@@ -4938,6 +5234,341 @@ def api_aiml_evaluate_date():
 @app.route('/aiml/evaluate_date', methods=['GET'])
 def api_aiml_evaluate_date_compat():
     return api_aiml_evaluate_date()
+
+
+# ========================= Live Trade Management =========================
+@app.route("/api/live_trade/status", methods=['GET'])
+def api_live_trade_status():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    return jsonify({
+        'status': 'success',
+        'deployment': _serialize_live_deployment(deployment)
+    })
+
+
+@app.route("/api/live_trade/deploy", methods=['POST'])
+def api_live_trade_deploy():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    data = request.get_json() or {}
+    strategy_id_raw = data.get('strategy_id')
+    initial_investment = data.get('initial_investment', 100000)
+    scheduled_start_raw = data.get('scheduled_start')
+
+    try:
+        initial_investment_value = float(initial_investment)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid initial investment amount.'}), 400
+
+    if initial_investment_value <= 0:
+        return jsonify({'status': 'error', 'message': 'Initial investment must be greater than 0.'}), 400
+
+    scheduled_start_dt: Optional[datetime.datetime] = None
+    if scheduled_start_raw:
+        try:
+            scheduled_start_dt = ensure_datetime(scheduled_start_raw)
+        except Exception:
+            return jsonify({'status': 'error', 'message': 'Invalid scheduled start datetime.'}), 400
+
+    user_id = session['user_id']
+
+    existing = live_get_deployment_for_user(user_id)
+    if existing and existing.get('status') not in {STATUS_STOPPED}:
+        return jsonify({
+            'status': 'error',
+            'message': 'An existing deployment is already active. Please stop it before deploying again.'
+        }), 400
+
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found.'}), 400
+
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+
+    strategy_id: Optional[int] = None
+    strategy_name = 'Ad-hoc Strategy'
+    if strategy_id_raw is not None:
+        try:
+            strategy_id = int(strategy_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
+        strategy_row = _get_strategy_record(strategy_id, user_id)
+        if not strategy_row:
+            return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+        strategy = dict(strategy_row)
+        strategy_name = strategy.get('strategy_name') or f"Strategy #{strategy_id}"
+
+    access_token = session['access_token']
+    try:
+        kite_client = KiteConnect(api_key=api_key)
+        kite_client.set_access_token(access_token)
+        margins = kite_client.margins()
+        available_cash = None
+        if isinstance(margins, dict):
+            equity = margins.get('equity') or {}
+            available_dict = equity.get('available') or {}
+            available_cash = (
+                available_dict.get('cash')
+                or available_dict.get('intraday')
+                or available_dict.get('adhoc_margin')
+            )
+        if available_cash is not None and initial_investment_value > float(available_cash):
+            return jsonify({
+                'status': 'error',
+                'message': f'Insufficient margin. Available: ₹{float(available_cash):.2f}'
+            }), 400
+    except Exception as exc:
+        logging.exception("Failed to validate margins for live trade deployment")
+        return jsonify({'status': 'error', 'message': f'Unable to validate Zerodha margin: {exc}'}), 500
+
+    now = datetime.datetime.utcnow()
+    status = STATUS_ACTIVE
+    phase = 'initializing'
+    message = 'Deployment activated immediately.'
+    if scheduled_start_dt and scheduled_start_dt > now:
+        status = STATUS_SCHEDULED
+        phase = 'scheduled'
+        message = f'Deployment scheduled for {scheduled_start_dt.isoformat()}'
+
+    state = {
+        'phase': phase,
+        'message': message,
+        'lastCheck': now.isoformat(),
+        'orders': [],
+        'positions': [],
+        'margin': {},
+        'livePnl': 0.0,
+        'history': [
+            {
+                'timestamp': now.isoformat(),
+                'level': 'info',
+                'message': 'Deployment created by user.',
+            }
+        ],
+    }
+
+    deployment = live_create_deployment(
+        user_id=user_id,
+        strategy_id=strategy_id,
+        strategy_name=strategy_name,
+        initial_investment=initial_investment_value,
+        scheduled_start=scheduled_start_dt,
+        status=status,
+        kite_access_token=access_token,
+        state=state
+    )
+
+    return jsonify({
+        'status': 'success',
+        'deployment': _serialize_live_deployment(deployment)
+    })
+
+
+@app.route("/api/live_trade/pause", methods=['POST'])
+def api_live_trade_pause():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    if not deployment:
+        return jsonify({'status': 'error', 'message': 'No deployment found to pause.'}), 404
+
+    if deployment.get('status') == STATUS_PAUSED:
+        return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(deployment)})
+
+    now = datetime.datetime.utcnow()
+    state = deployment.get('state') or {}
+    state.update({
+        'phase': 'paused',
+        'message': 'Deployment paused by user.',
+        'lastCheck': now.isoformat(),
+    })
+
+    updated = live_update_deployment(
+        deployment['id'],
+        status=STATUS_PAUSED,
+        state=state,
+        last_run_at=now,
+        error_message=None
+    )
+
+    return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(updated)})
+
+
+@app.route("/api/live_trade/resume", methods=['POST'])
+def api_live_trade_resume():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    if not deployment:
+        return jsonify({'status': 'error', 'message': 'No deployment found to resume.'}), 404
+
+    if deployment.get('status') == STATUS_ACTIVE:
+        return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(deployment)})
+
+    now = datetime.datetime.utcnow()
+    state = deployment.get('state') or {}
+    state.update({
+        'phase': 'resuming',
+        'message': 'Deployment resume requested by user.',
+        'lastCheck': now.isoformat(),
+    })
+
+    updated = live_update_deployment(
+        deployment['id'],
+        status=STATUS_ACTIVE,
+        state=state,
+        last_run_at=now,
+        error_message=None
+    )
+
+    return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(updated)})
+
+
+@app.route("/api/live_trade/stop", methods=['POST'])
+def api_live_trade_stop():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    if not deployment:
+        return jsonify({'status': 'error', 'message': 'No deployment found to stop.'}), 404
+
+    now = datetime.datetime.utcnow()
+    state = deployment.get('state') or {}
+    state.update({
+        'phase': 'stopped',
+        'message': 'Deployment stopped by user.',
+        'lastCheck': now.isoformat(),
+    })
+
+    updated = live_update_deployment(
+        deployment['id'],
+        status=STATUS_STOPPED,
+        state=state,
+        last_run_at=now,
+        error_message=None
+    )
+
+    return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(updated)})
+
+
+@app.route("/api/live_trade/square_off", methods=['POST'])
+def api_live_trade_square_off():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    if not deployment:
+        return jsonify({'status': 'error', 'message': 'No deployment found to square off.'}), 404
+
+    user_row = _get_user_record(session['user_id'])
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found.'}), 400
+
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+
+    access_token = deployment.get('kite_access_token') or session['access_token']
+
+    try:
+        kite_client = KiteConnect(api_key=api_key)
+        kite_client.set_access_token(access_token)
+        positions = kite_client.positions()
+    except Exception as exc:
+        logging.exception("Failed to fetch positions during square off")
+        return jsonify({'status': 'error', 'message': f'Failed to fetch positions: {exc}'}), 500
+
+    net_positions = positions.get('net', []) if isinstance(positions, dict) else []
+    exit_results = []
+
+    for pos in net_positions:
+        qty = pos.get('quantity')
+        if not qty:
+            continue
+
+        tradingsymbol = pos.get('tradingsymbol')
+        exchange = pos.get('exchange') or 'NFO'
+        product = pos.get('product') or kite_client.PRODUCT_MIS
+        exit_qty = abs(int(qty))
+        transaction_type = (
+            kite_client.TRANSACTION_TYPE_SELL if qty > 0 else kite_client.TRANSACTION_TYPE_BUY
+        )
+
+        try:
+            order_id = kite_client.place_order(
+                variety=kite_client.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=transaction_type,
+                quantity=exit_qty,
+                product=product,
+                order_type=kite_client.ORDER_TYPE_MARKET,
+                validity=kite_client.VALIDITY_DAY
+            )
+            exit_results.append({
+                'tradingsymbol': tradingsymbol,
+                'quantity': exit_qty,
+                'status': 'placed',
+                'order_id': order_id
+            })
+        except Exception as exc:
+            logging.exception("Square-off order failed for %s", tradingsymbol)
+            exit_results.append({
+                'tradingsymbol': tradingsymbol,
+                'quantity': exit_qty,
+                'status': 'error',
+                'message': str(exc)
+            })
+
+    now = datetime.datetime.utcnow()
+    state = deployment.get('state') or {}
+    state.update({
+        'phase': 'square_off',
+        'message': 'Square-off initiated. Review order statuses for confirmation.',
+        'lastCheck': now.isoformat(),
+        'squareOff': exit_results,
+    })
+
+    updated = live_update_deployment(
+        deployment['id'],
+        status=deployment.get('status', STATUS_ACTIVE),
+        state=state,
+        last_run_at=now
+    )
+
+    return jsonify({
+        'status': 'success',
+        'deployment': _serialize_live_deployment(updated),
+        'results': exit_results
+    })
+
+
+@app.route("/api/live_trade/delete", methods=['DELETE'])
+def api_live_trade_delete():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    deployment = live_get_deployment_for_user(session['user_id'])
+    if not deployment:
+        return jsonify({'status': 'success', 'message': 'No deployment to delete.'})
+
+    live_delete_deployment(deployment['id'])
+    return jsonify({'status': 'success', 'message': 'Deployment deleted.'})
 
 
 # ========================= Reinforcement Learning =========================
