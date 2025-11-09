@@ -18,6 +18,7 @@ import smtplib, ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import datetime
+import calendar
 import secrets
 import config
 from database import get_db_connection
@@ -35,6 +36,10 @@ from live_trade import (
     STATUS_STOPPED,
     STATUS_ERROR,
 )
+
+# Constants for market instruments
+BANKNIFTY_SPOT_SYMBOL = 'NSE:NIFTY BANK'
+NIFTY_SPOT_SYMBOL = 'NSE:NIFTY 50'
 from chat import chat_bp
 from utils.backtest_metrics import calculate_all_metrics
 from ai_ml import train_lstm_on_candles, load_model_and_predict, load_lstm_checkpoint
@@ -881,6 +886,123 @@ def _sanitize_positions(raw_positions: Dict[str, Any]) -> List[Dict[str, Any]]:
             'm2m': pos.get('m2m'),
         })
     return positions
+
+
+def _last_thursday(year: int, month: int) -> datetime.date:
+    last_day = calendar.monthrange(year, month)[1]
+    date_obj = datetime.date(year, month, last_day)
+    while date_obj.weekday() != 3:  # Thursday
+        date_obj -= datetime.timedelta(days=1)
+    return date_obj
+
+
+def get_next_monthly_expiry(reference_date: Optional[datetime.date] = None) -> datetime.date:
+    if reference_date is None:
+        reference_date = datetime.date.today()
+    year = reference_date.year
+    month = reference_date.month
+    expiry = _last_thursday(year, month)
+    if reference_date > expiry:
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+        expiry = _last_thursday(year, month)
+    return expiry
+
+
+def get_spot_quote(kite_client: KiteConnect, instrument_key: str) -> float:
+    if instrument_key.upper().startswith('BANK'):
+        quote_token = BANKNIFTY_SPOT_SYMBOL
+    else:
+        quote_token = NIFTY_SPOT_SYMBOL
+    quote = kite_client.quote([quote_token])
+    data = quote.get(quote_token)
+    if not data:
+        raise RuntimeError(f"Unable to fetch spot quote for {quote_token}")
+    last_price = data.get('last_price')
+    if last_price is None:
+        raise RuntimeError(f"Spot quote missing last price for {quote_token}")
+    return float(last_price)
+
+
+def get_strategy_rule_config(strategy_row: Optional[sqlite3.Row]) -> Dict[str, Any]:
+    if not strategy_row:
+        return {}
+    name = (strategy_row['strategy_name'] or '').lower()
+    strategy_type = (strategy_row['strategy_type'] or '').lower() if 'strategy_type' in strategy_row.keys() else ''
+    # Mountain Signal strategy identification
+    if 'mountain' in name or 'mountain' in strategy_type:
+        rules = load_mountain_signal_pe_rules()
+        return rules or {}
+    return {}
+
+
+def compose_option_symbol(underlying: str, expiry: datetime.date, strike: int, option_type: str) -> str:
+    year = expiry.strftime('%y')
+    month = expiry.strftime('%b').upper()
+    return f"{underlying}{year}{month}{int(strike)}{option_type.upper()}"
+
+
+def preview_option_trade(
+    kite_client: KiteConnect,
+    strategy_row: sqlite3.Row,
+    lot_count: int
+) -> Dict[str, Any]:
+    if lot_count <= 0:
+        raise ValueError("Lot count must be greater than zero")
+
+    rules = get_strategy_rule_config(strategy_row)
+    instrument = (strategy_row['instrument'] or 'BANKNIFTY').upper()
+    option_type = 'PE'
+
+    strike_rounding_map = (rules.get('strike_rounding') or {})
+    lot_sizes_map = (rules.get('lot_sizes') or {})
+    option_trade_config = rules.get('option_trade') or {}
+
+    strike_step = strike_rounding_map.get(instrument, 100 if 'BANK' in instrument else 50)
+    lot_size = lot_sizes_map.get(instrument, 35 if 'BANK' in instrument else 75)
+    stop_loss_percent = option_trade_config.get('stop_loss_percent', -0.17)
+    target_percent = option_trade_config.get('target_percent', 0.45)
+
+    spot_price = get_spot_quote(kite_client, instrument)
+    atm_strike = round_to_atm_price(spot_price, strike_step)
+    ist_timezone = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    today_ist = datetime.datetime.now(datetime.timezone.utc).astimezone(ist_timezone)
+    expiry_date = get_next_monthly_expiry(today_ist.date())
+    option_symbol = compose_option_symbol(instrument, expiry_date, atm_strike, option_type)
+
+    quote = kite_client.quote([f'NFO:{option_symbol}'])
+    option_quote = quote.get(f'NFO:{option_symbol}')
+    if not option_quote:
+        raise RuntimeError(f"Unable to fetch quote for option {option_symbol}")
+    option_ltp = float(option_quote.get('last_price') or 0.0)
+    if option_ltp <= 0:
+        raise RuntimeError(f"Option {option_symbol} returned invalid LTP {option_ltp}")
+
+    total_quantity = lot_size * lot_count
+    required_capital = option_ltp * total_quantity
+    stop_loss_price = round(option_ltp * (1 + stop_loss_percent), 2)
+    target_price = round(option_ltp * (1 + target_percent), 2)
+
+    return {
+        'instrument': instrument,
+        'optionSymbol': option_symbol,
+        'optionType': option_type,
+        'expiryDate': expiry_date.isoformat(),
+        'strike': atm_strike,
+        'spotPrice': spot_price,
+        'optionLtp': option_ltp,
+        'lotSize': lot_size,
+        'lotCount': lot_count,
+        'totalQuantity': total_quantity,
+        'requiredCapital': required_capital,
+        'stopLossPercent': stop_loss_percent,
+        'targetPercent': target_percent,
+        'stopLossPrice': stop_loss_price,
+        'targetPrice': target_price,
+    }
 
 
 def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datetime.datetime) -> None:
@@ -5264,6 +5386,63 @@ def api_live_trade_status():
     })
 
 
+@app.route("/api/live_trade/preview", methods=['POST'])
+def api_live_trade_preview():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    data = request.get_json() or {}
+    strategy_id_raw = data.get('strategy_id')
+    lot_count_raw = data.get('lot_count', 1)
+
+    try:
+        lot_count = int(lot_count_raw)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid lot count.'}), 400
+    if lot_count <= 0:
+        return jsonify({'status': 'error', 'message': 'Lot count must be greater than zero.'}), 400
+
+    if strategy_id_raw is None:
+        return jsonify({'status': 'error', 'message': 'Strategy identifier required.'}), 400
+
+    try:
+        strategy_id = int(strategy_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
+
+    strategy_row = _get_strategy_record(strategy_id, session['user_id'])
+    if not strategy_row:
+        return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+
+    user_row = _get_user_record(session['user_id'])
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found.'}), 400
+
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+
+    try:
+        kite_client = KiteConnect(api_key=api_key)
+        kite_client.set_access_token(session['access_token'])
+        preview = preview_option_trade(kite_client, strategy_row, lot_count)
+    except Exception as exc:
+        logging.exception("Margin preview failed")
+        return jsonify({'status': 'error', 'message': f'Unable to compute margin preview: {exc}'}), 500
+
+    return jsonify({
+        'status': 'success',
+        'preview': {
+            **preview,
+            'stopLossPercentDisplay': abs(preview['stopLossPercent']) * 100,
+            'targetPercentDisplay': abs(preview['targetPercent']) * 100,
+        }
+    })
+
+
 @app.route("/api/live_trade/deploy", methods=['POST'])
 def api_live_trade_deploy():
     if 'user_id' not in session:
@@ -5273,16 +5452,15 @@ def api_live_trade_deploy():
 
     data = request.get_json() or {}
     strategy_id_raw = data.get('strategy_id')
-    initial_investment = data.get('initial_investment', 100000)
+    lot_count_raw = data.get('lot_count', 1)
     scheduled_start_raw = data.get('scheduled_start')
 
     try:
-        initial_investment_value = float(initial_investment)
+        lot_count = int(lot_count_raw)
     except (TypeError, ValueError):
-        return jsonify({'status': 'error', 'message': 'Invalid initial investment amount.'}), 400
-
-    if initial_investment_value <= 0:
-        return jsonify({'status': 'error', 'message': 'Initial investment must be greater than 0.'}), 400
+        return jsonify({'status': 'error', 'message': 'Invalid lot count.'}), 400
+    if lot_count <= 0:
+        return jsonify({'status': 'error', 'message': 'Lot count must be greater than zero.'}), 400
 
     scheduled_start_dt: Optional[datetime.datetime] = None
     if scheduled_start_raw:
@@ -5311,21 +5489,25 @@ def api_live_trade_deploy():
 
     strategy_id: Optional[int] = None
     strategy_name = 'Ad-hoc Strategy'
-    if strategy_id_raw is not None:
-        try:
-            strategy_id = int(strategy_id_raw)
-        except (TypeError, ValueError):
-            return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
-        strategy_row = _get_strategy_record(strategy_id, user_id)
-        if not strategy_row:
-            return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
-        strategy = dict(strategy_row)
-        strategy_name = strategy.get('strategy_name') or f"Strategy #{strategy_id}"
+    strategy_row = None
+    if strategy_id_raw is None:
+        return jsonify({'status': 'error', 'message': 'Strategy identifier required.'}), 400
+    try:
+        strategy_id = int(strategy_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
+    strategy_row = _get_strategy_record(strategy_id, user_id)
+    if not strategy_row:
+        return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+    strategy = dict(strategy_row)
+    strategy_name = strategy.get('strategy_name') or f"Strategy #{strategy_id}"
 
     access_token = session['access_token']
+    preview: Optional[Dict[str, Any]] = None
     try:
         kite_client = KiteConnect(api_key=api_key)
         kite_client.set_access_token(access_token)
+        preview = preview_option_trade(kite_client, strategy_row, lot_count)
         margins = kite_client.margins()
         available_cash = None
         if isinstance(margins, dict):
@@ -5336,10 +5518,10 @@ def api_live_trade_deploy():
                 or available_dict.get('intraday')
                 or available_dict.get('adhoc_margin')
             )
-        if available_cash is not None and initial_investment_value > float(available_cash):
+        if available_cash is not None and preview['requiredCapital'] > float(available_cash):
             return jsonify({
                 'status': 'error',
-                'message': f'Insufficient margin. Available: ₹{float(available_cash):.2f}'
+                'message': f'Insufficient margin. Required ₹{preview["requiredCapital"]:.2f}, Available ₹{float(available_cash):.2f}'
             }), 400
     except Exception as exc:
         logging.exception("Failed to validate margins for live trade deployment")
@@ -5360,7 +5542,9 @@ def api_live_trade_deploy():
         'lastCheck': now.isoformat(),
         'orders': [],
         'positions': [],
-        'margin': {},
+        'margin': {
+            'requiredCapital': preview['requiredCapital'],
+        },
         'livePnl': 0.0,
         'history': [
             {
@@ -5369,13 +5553,21 @@ def api_live_trade_deploy():
                 'message': 'Deployment created by user.',
             }
         ],
+        'config': {
+            'lotCount': lot_count,
+            'lotSize': preview['lotSize'],
+            'totalQuantity': preview['totalQuantity'],
+            'optionSymbol': preview['optionSymbol'],
+            'stopLossPercent': preview['stopLossPercent'],
+            'targetPercent': preview['targetPercent'],
+        }
     }
 
     deployment = live_create_deployment(
         user_id=user_id,
         strategy_id=strategy_id,
         strategy_name=strategy_name,
-        initial_investment=initial_investment_value,
+        initial_investment=preview['requiredCapital'],
         scheduled_start=scheduled_start_dt,
         status=status,
         kite_access_token=access_token,

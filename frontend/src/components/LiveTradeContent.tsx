@@ -56,6 +56,26 @@ interface SquareOffResult {
   message?: string;
 }
 
+interface LiveTradePreview {
+  instrument: string;
+  optionSymbol: string;
+  optionType: string;
+  expiryDate: string;
+  strike: number;
+  spotPrice: number;
+  optionLtp: number;
+  stopLossPrice: number;
+  targetPrice: number;
+  lotSize: number;
+  lotCount: number;
+  totalQuantity: number;
+  requiredCapital: number;
+  stopLossPercent: number;
+  stopLossPercentDisplay: number;
+  targetPercent: number;
+  targetPercentDisplay: number;
+}
+
 interface LiveDeploymentState {
   phase?: string;
   message?: string;
@@ -65,10 +85,19 @@ interface LiveDeploymentState {
   margin?: {
     availableCash?: number;
     snapshot?: Record<string, unknown>;
+    requiredCapital?: number;
   };
   livePnl?: number;
   history?: HistoryEntry[];
   squareOff?: SquareOffResult[];
+  config?: {
+    lotCount?: number;
+    lotSize?: number;
+    totalQuantity?: number;
+    optionSymbol?: string;
+    stopLossPercent?: number;
+    targetPercent?: number;
+  };
 }
 
 interface LiveDeployment {
@@ -90,13 +119,15 @@ interface LiveDeployment {
 const LiveTradeContent: React.FC = () => {
   const [strategies, setStrategies] = useState<StrategyOption[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<string>('');
-  const [initialInvestment, setInitialInvestment] = useState<number>(100000);
+  const [lotCount, setLotCount] = useState<number>(1);
   const [scheduledStart, setScheduledStart] = useState<string>('');
   const [deployment, setDeployment] = useState<LiveDeployment | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [statusLoading, setStatusLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [preview, setPreview] = useState<LiveTradePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
 
   const formatCurrency = useCallback((value?: number | null, fallback = '—') => {
     if (value === undefined || value === null || Number.isNaN(value)) {
@@ -150,6 +181,39 @@ const LiveTradeContent: React.FC = () => {
     }
   }, []);
 
+  const fetchPreview = useCallback(
+    async (strategyId: string, lots: number) => {
+      if (!strategyId || lots <= 0) {
+        setPreview(null);
+        return;
+      }
+      try {
+        setPreviewLoading(true);
+        const response = await fetch('http://localhost:8000/api/live_trade/preview', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            strategy_id: strategyId,
+            lot_count: lots,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+          throw new Error(data.message || 'Unable to compute trade preview');
+        }
+        setPreview(data.preview as LiveTradePreview);
+      } catch (err) {
+        console.error('Preview fetch error:', err);
+        setPreview(null);
+        setError(err instanceof Error ? err.message : 'Unable to compute required capital.');
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    []
+  );
+
   const fetchDeploymentStatus = useCallback(async () => {
     try {
       setStatusLoading(true);
@@ -179,6 +243,14 @@ const LiveTradeContent: React.FC = () => {
     return () => clearInterval(interval);
   }, [fetchDeploymentStatus]);
 
+  useEffect(() => {
+    if (selectedStrategy) {
+      fetchPreview(selectedStrategy, lotCount);
+    } else {
+      setPreview(null);
+    }
+  }, [selectedStrategy, lotCount, fetchPreview]);
+
   const handleDeploy = async () => {
     setError(null);
     setActionMessage(null);
@@ -187,8 +259,12 @@ const LiveTradeContent: React.FC = () => {
       setError('Please select a strategy to deploy.');
       return;
     }
-    if (initialInvestment <= 0) {
-      setError('Investment amount must be greater than zero.');
+    if (lotCount <= 0) {
+      setError('Lot count must be greater than zero.');
+      return;
+    }
+    if (!preview) {
+      setError('Unable to compute trade preview. Please try again.');
       return;
     }
 
@@ -196,7 +272,7 @@ const LiveTradeContent: React.FC = () => {
     try {
       const payload: Record<string, unknown> = {
         strategy_id: selectedStrategy,
-        initial_investment: initialInvestment,
+        lot_count: lotCount,
       };
       if (scheduledStart) {
         const isoString = new Date(scheduledStart).toISOString();
@@ -285,6 +361,10 @@ const LiveTradeContent: React.FC = () => {
   const positions = deployment?.state?.positions ?? [];
   const squareOffResults = deployment?.state?.squareOff ?? [];
   const availableCash = deployment?.state?.margin?.availableCash;
+  const requiredCapital = preview?.requiredCapital ?? deployment?.state?.margin?.requiredCapital;
+  const config = deployment?.state?.config ?? {};
+  const stopLossDisplay = preview ? preview.stopLossPercentDisplay : config.stopLossPercent ? Math.abs(config.stopLossPercent) * 100 : null;
+  const targetDisplay = preview ? preview.targetPercentDisplay : config.targetPercent ? Math.abs(config.targetPercent) * 100 : null;
 
   return (
     <div className="container-fluid py-3">
@@ -318,18 +398,68 @@ const LiveTradeContent: React.FC = () => {
               </div>
 
               <div className="mb-3">
-                <label htmlFor="investment-input" className="form-label fw-semibold">
-                  Initial Investment (₹)
+                <label htmlFor="lot-count-input" className="form-label fw-semibold">
+                  Quantity (Lots)
                 </label>
                 <input
-                  id="investment-input"
+                  id="lot-count-input"
                   type="number"
-                  min={1000}
-                  step={1000}
+                  min={1}
+                  step={1}
                   className="form-control"
-                  value={initialInvestment}
-                  onChange={(e) => setInitialInvestment(Number(e.target.value))}
+                  value={lotCount}
+                  onChange={(e) => setLotCount(Number(e.target.value))}
                 />
+                <div className="form-text">
+                  Lot size depends on the selected strategy (e.g., BankNifty 35 qty per lot).
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <label className="form-label fw-semibold d-flex align-items-center">
+                  Trade Preview
+                  {previewLoading && (
+                    <span className="spinner-border spinner-border-sm ms-2" role="status" />
+                  )}
+                </label>
+                {preview ? (
+                  <div className="bg-light rounded p-3 small">
+                    <div className="d-flex justify-content-between">
+                      <span>Option Symbol</span>
+                      <span className="fw-semibold">{preview.optionSymbol}</span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Strike / Expiry</span>
+                      <span>{preview.strike} · {new Date(preview.expiryDate).toLocaleDateString()}</span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Option LTP</span>
+                      <span>{preview.optionLtp.toFixed(2)}</span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Lot Size x Lots</span>
+                      <span>{preview.lotSize} × {preview.lotCount} = {preview.totalQuantity}</span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Required Capital</span>
+                      <span className="fw-semibold text-primary">
+                        {formatCurrency(preview.requiredCapital)}
+                      </span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Stop Loss</span>
+                      <span>{preview.stopLossPercentDisplay.toFixed(2)}% (₹{preview.stopLossPrice.toFixed(2)})</span>
+                    </div>
+                    <div className="d-flex justify-content-between">
+                      <span>Target</span>
+                      <span>{preview.targetPercentDisplay.toFixed(2)}% (₹{preview.targetPrice.toFixed(2)})</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-muted small">
+                    Select a strategy to view strike, lot size, and capital requirements.
+                  </div>
+                )}
               </div>
 
               <div className="mb-3">
@@ -469,8 +599,10 @@ const LiveTradeContent: React.FC = () => {
                           </span>
                         </p>
                         <p className="mb-1">
-                          <strong>Initial Investment:</strong>{' '}
-                          {formatCurrency(deployment.initialInvestment)}
+                          <strong>Lots × Lot Size:</strong>{' '}
+                          {config.lotCount && config.lotSize
+                            ? `${config.lotCount} × ${config.lotSize} = ${config.totalQuantity ?? config.lotCount * config.lotSize}`
+                            : '—'}
                         </p>
                         <p className="mb-1">
                           <strong>Scheduled Start:</strong>{' '}
@@ -499,6 +631,16 @@ const LiveTradeContent: React.FC = () => {
                         <p className="mb-1">
                           <strong>Available Cash:</strong>{' '}
                           {formatCurrency(availableCash)}
+                        </p>
+                        <p className="mb-1">
+                          <strong>Required Capital:</strong>{' '}
+                          {formatCurrency(requiredCapital)}
+                        </p>
+                        <p className="mb-1">
+                          <strong>Stop Loss / Target:</strong>{' '}
+                          {stopLossDisplay !== null && targetDisplay !== null
+                            ? `${stopLossDisplay.toFixed(2)}% / ${targetDisplay.toFixed(2)}%`
+                            : '—'}
                         </p>
                         <p className="mb-0">
                           <strong>Live P&L:</strong>{' '}
