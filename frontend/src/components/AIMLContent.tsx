@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea } from 'recharts';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea, CartesianGrid } from 'recharts';
 
 interface AIMLContentProps {}
 
@@ -227,90 +227,24 @@ export default AIMLContent;
 
 // Inline component for Phase-1 predictions UI
 const AIMLPredictions: React.FC = () => {
+  const DEFAULT_HORIZON = 1;
+  const DEFAULT_LOOKBACK = 60;
   const [symbol, setSymbol] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
-  const [years, setYears] = useState<number>(2);
-  const [horizon, setHorizon] = useState<number>(1);
-  const [lookback, setLookback] = useState<number>(60);
-  const [epochs, setEpochs] = useState<number>(15);
-  const [steps, setSteps] = useState<number>(3);
-
-  const [loading, setLoading] = useState<boolean>(false);
-  const [trainingInfo, setTrainingInfo] = useState<any>(null);
-  const [prediction, setPrediction] = useState<{ predictions: number[]; confidence: number } | null>(null);
-  const [overlaySeries, setOverlaySeries] = useState<Array<{ time: string; actual: number; predicted: number; subset: 'train'|'test' }>>([]);
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [dateSeries, setDateSeries] = useState<Array<{ time: string; actual: number; predicted: number }>>([]);
+  const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-
-  const trainModel = async () => {
-    setError(null);
-    setLoading(true);
-    setTrainingInfo(null);
-    try {
-      const res = await fetch('/api/aiml/train', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, years, horizon, lookback, epochs }),
-      });
-      const ct = res.headers.get('content-type') || '';
-      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
-      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Training failed');
-      setTrainingInfo(data);
-    } catch (e: any) {
-      setError(e.message || 'Training error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const runPrediction = async () => {
-    setError(null);
-    setLoading(true);
-    setPrediction(null);
-    try {
-      const params = new URLSearchParams({ symbol, horizon: String(horizon), steps: String(steps), lookback: String(lookback) });
-      const res = await fetch(`/api/aiml/predict?${params.toString()}`);
-      const ct = res.headers.get('content-type') || '';
-      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
-      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Prediction failed');
-      setPrediction({ predictions: data.predictions || [], confidence: data.confidence || 0 });
-    } catch (e: any) {
-      setError(e.message || 'Prediction error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchOverlay = async () => {
-    setError(null);
-    setLoading(true);
-    setOverlaySeries([]);
-    setDateSeries([]);
-    try {
-      const params = new URLSearchParams({ symbol, years: String(3), horizon: String(horizon), lookback: String(lookback) });
-      const res = await fetch(`/api/aiml/evaluate?${params.toString()}`);
-      const ct = res.headers.get('content-type') || '';
-      const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
-      if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'Evaluation failed');
-      setOverlaySeries(data.series || []);
-    } catch (e: any) {
-      setError(e.message || 'Overlay fetch error');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const fetchDateData = async () => {
     setError(null);
     setLoading(true);
     setDateSeries([]);
-    setOverlaySeries([]);
     try {
       const params = new URLSearchParams({
         symbol,
         date: selectedDate,
-        horizon: String(horizon),
-        lookback: String(lookback)
+        horizon: String(DEFAULT_HORIZON),
+        lookback: String(DEFAULT_LOOKBACK)
       });
       const res = await fetch(`/api/aiml/evaluate_date?${params.toString()}`);
       const ct = res.headers.get('content-type') || '';
@@ -333,20 +267,32 @@ const AIMLPredictions: React.FC = () => {
         </h6>
       </div>
       <div className="card-body">
-        <div className="mt-3 d-flex gap-2 align-items-end">
-          <div className="d-flex gap-2 align-items-end">
-            <div>
-              <label className="form-label small mb-1">Select Date</label>
-              <input
-                type="date"
-                className="form-control form-control-sm"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-                max={new Date().toISOString().split('T')[0]}
-                disabled={loading}
-              />
-            </div>
-            <button className="btn btn-outline-info" onClick={fetchDateData} disabled={loading || !selectedDate}>
+        <div className="row g-3 align-items-end">
+          <div className="col-sm-6 col-md-3">
+            <label className="form-label small mb-1">Index</label>
+            <select
+              className="form-select form-select-sm"
+              value={symbol}
+              disabled={loading}
+              onChange={(e) => setSymbol(e.target.value as 'NIFTY' | 'BANKNIFTY')}
+            >
+              <option value="NIFTY">NIFTY</option>
+              <option value="BANKNIFTY">BANKNIFTY</option>
+            </select>
+          </div>
+          <div className="col-sm-6 col-md-3">
+            <label className="form-label small mb-1">Select Date</label>
+            <input
+              type="date"
+              className="form-control form-control-sm"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              max={new Date().toISOString().split('T')[0]}
+              disabled={loading}
+            />
+          </div>
+          <div className="col-sm-12 col-md-3">
+            <button className="btn btn-outline-info btn-sm mt-4" onClick={fetchDateData} disabled={loading || !selectedDate}>
               {loading ? 'Loading...' : 'Show Date Chart'}
             </button>
           </div>
@@ -449,6 +395,67 @@ const DateChart: React.FC<{ data: Array<{ time: string; actual: number; predicte
   );
 };
 
+const RLEquityChart: React.FC<{ data: Array<{ time: string; equity: number; pnl?: number; subset?: string }> }> = ({ data }) => {
+  if (!data.length) return null;
+  const chartData = data.map((d) => ({
+    time: d.time,
+    equity: d.equity,
+    pnl: d.pnl,
+    subset: d.subset,
+  }));
+  const testEntries = chartData.filter((d) => d.subset === 'test');
+  const testStart = testEntries.length > 0 ? testEntries[0].time : undefined;
+  const testEnd = testEntries.length > 0 ? testEntries[testEntries.length - 1].time : undefined;
+
+  return (
+    <div>
+      <ResponsiveContainer width="100%" height={420}>
+        <LineChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 60 }}>
+          {testStart && testEnd && (
+            <ReferenceArea x1={testStart} x2={testEnd} strokeOpacity={0.1} fill="#d1ecf1" fillOpacity={0.3} />
+          )}
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis
+            dataKey="time"
+            tickFormatter={(value) => {
+              const dateObj = new Date(value);
+              if (Number.isNaN(dateObj.getTime())) {
+                return value;
+              }
+              return `${dateObj.toLocaleDateString()} ${dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+            }}
+            angle={-45}
+            textAnchor="end"
+            height={80}
+            interval="preserveStartEnd"
+          />
+          <YAxis domain={['auto', 'auto']} />
+          <Tooltip
+            formatter={(value, name) => {
+              if (name === 'Equity' || name === 'PnL') {
+                return [`₹${Number(value).toFixed(2)}`, name];
+              }
+              return [value, name];
+            }}
+            labelFormatter={(label) => {
+              const dateObj = new Date(label);
+              return Number.isNaN(dateObj.getTime()) ? label : dateObj.toLocaleString();
+            }}
+          />
+          <Legend />
+          <Line type="monotone" dataKey="equity" stroke="#28a745" dot={false} strokeWidth={2} name="Equity" />
+          <Line type="monotone" dataKey="pnl" stroke="#dc3545" dot={false} strokeWidth={1} name="PnL" />
+        </LineChart>
+      </ResponsiveContainer>
+      <div className="mt-2">
+        <span className="badge bg-success me-2">Equity</span>
+        <span className="badge bg-danger me-2">PnL</span>
+        <span className="badge bg-info text-dark">Shaded: Evaluation Test Region (30%)</span>
+      </div>
+    </div>
+  );
+};
+
 const TrainModelPanel: React.FC = () => {
   const [symbol, setSymbol] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
   const [years, setYears] = useState<number>(2);
@@ -473,6 +480,9 @@ const TrainModelPanel: React.FC = () => {
   const [rlEvaluationResults, setRlEvaluationResults] = useState<any>(null);
   const [savedStrategies, setSavedStrategies] = useState<Array<{ id: string | number; strategy_name?: string; name?: string }>>([]);
   const [strategiesLoading, setStrategiesLoading] = useState<boolean>(false);
+  const [rlSeries, setRlSeries] = useState<Array<any>>([]);
+  const [rlChartSeries, setRlChartSeries] = useState<Array<any>>([]);
+  const [rlSelectedDate, setRlSelectedDate] = useState<string>('');
 
   const trainModel = async () => {
     setLoading(true);
@@ -559,6 +569,8 @@ const TrainModelPanel: React.FC = () => {
     setError(null);
     setRlLoading(true);
     setRlEvaluationResults(null);
+    setRlSeries([]);
+    setRlChartSeries([]);
     try {
       const params = new URLSearchParams({ symbol: rlSymbol, years: '0.5' });
       const res = await fetch(`http://localhost:8000/api/rl/evaluate?${params.toString()}`, {
@@ -568,6 +580,17 @@ const TrainModelPanel: React.FC = () => {
       const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
       if (!res.ok || data.status !== 'ok') throw new Error(data.message || 'RL evaluation failed');
       setRlEvaluationResults(data);
+      const series = data.series || [];
+      setRlSeries(series);
+      setRlChartSeries(series);
+      if (series.length > 0) {
+        const lastEntry = series[series.length - 1];
+        const initialEntry = series[0];
+        const lastDate = lastEntry.date || (lastEntry.time ? lastEntry.time.substring(0, 10) : '');
+        setRlSelectedDate(lastDate || (initialEntry?.date ?? ''));
+      } else {
+        setRlSelectedDate('');
+      }
     } catch (e: any) {
       setError(e.message || 'RL evaluation error');
     } finally {
@@ -596,6 +619,19 @@ const TrainModelPanel: React.FC = () => {
 
     fetchSavedStrategies();
   }, []);
+
+  const showRlDateChart = () => {
+    if (!rlSeries.length) return;
+    if (!rlSelectedDate) {
+      setRlChartSeries(rlSeries);
+      return;
+    }
+    const filtered = rlSeries.filter((entry) => {
+      const dateValue = entry.date || (entry.time ? entry.time.substring(0, 10) : '');
+      return dateValue === rlSelectedDate;
+    });
+    setRlChartSeries(filtered.length > 0 ? filtered : rlSeries);
+  };
 
   return (
     <>
@@ -739,6 +775,7 @@ const TrainModelPanel: React.FC = () => {
             <div className="col-md-2">
               <label className="form-label">Years</label>
               <select className="form-select" value={rlYears} onChange={(e) => setRlYears(Number(e.target.value))}>
+                <option value={1}>1</option>
                 <option value={2}>2</option>
                 <option value={3}>3</option>
               </select>
@@ -761,7 +798,7 @@ const TrainModelPanel: React.FC = () => {
             <button className="btn btn-success" onClick={trainRL} disabled={rlLoading}>
               {rlLoading ? 'Training...' : 'Train RL Agent'}
             </button>
-            <button className="btn btn-outline-success" onClick={evaluateRL} disabled={rlLoading || !rlTrainingInfo}>
+            <button className="btn btn-outline-success" onClick={evaluateRL} disabled={rlLoading}>
               {rlLoading ? 'Evaluating...' : 'Evaluate on Test Data'}
             </button>
           </div>
@@ -779,8 +816,10 @@ const TrainModelPanel: React.FC = () => {
                   </div>
                   <div className="col-md-6">
                     <p><strong>Total Trades:</strong> {rlTrainingInfo.trade_count ?? 'N/A'}</p>
-                    <p><strong>Win Ratio:</strong> {(rlTrainingInfo.win_ratio * 100).toFixed(1)}%</p>
-                    <p><strong>Max Drawdown:</strong> {rlTrainingInfo.max_drawdown?.toFixed(2) || 'N/A'}</p>
+                    <p><strong>Winning Trades:</strong> {rlTrainingInfo.winning_trades ?? 'N/A'}</p>
+                    <p><strong>Losing Trades:</strong> {rlTrainingInfo.losing_trades ?? 'N/A'}</p>
+                    <p><strong>Win Ratio:</strong> {rlTrainingInfo.win_ratio !== undefined ? `${(rlTrainingInfo.win_ratio * 100).toFixed(1)}%` : 'N/A'}</p>
+                    <p><strong>Max Drawdown:</strong> {rlTrainingInfo.max_drawdown !== undefined ? `₹${rlTrainingInfo.max_drawdown.toFixed(2)}` : 'N/A'}</p>
                   </div>
                 </div>
               </div>
@@ -792,10 +831,54 @@ const TrainModelPanel: React.FC = () => {
               <div className="alert alert-primary">
                 <h6><strong>Evaluation Results</strong></h6>
                 <p><strong>Period:</strong> {rlEvaluationResults.period}</p>
-                <p><strong>Net PnL:</strong> ₹{rlEvaluationResults.pnl?.toFixed(2)}</p>
-                <p><strong>Winning Trades:</strong> {rlEvaluationResults.wins}</p>
-                <p><strong>Losing Trades:</strong> {rlEvaluationResults.losses}</p>
+                <p><strong>Net PnL:</strong> ₹{rlEvaluationResults.pnl !== undefined ? rlEvaluationResults.pnl.toFixed(2) : 'N/A'}</p>
+                <p><strong>Winning Trades:</strong> {rlEvaluationResults.wins ?? 'N/A'}</p>
+                <p><strong>Losing Trades:</strong> {rlEvaluationResults.losses ?? 'N/A'}</p>
+                <p><strong>Win Rate:</strong> {rlEvaluationResults.win_rate !== undefined ? `${rlEvaluationResults.win_rate.toFixed(2)}%` : 'N/A'}</p>
+                <p><strong>Average Win:</strong> ₹{rlEvaluationResults.avg_win !== undefined ? rlEvaluationResults.avg_win.toFixed(2) : 'N/A'}</p>
+                <p><strong>Average Loss:</strong> ₹{rlEvaluationResults.avg_loss !== undefined ? rlEvaluationResults.avg_loss.toFixed(2) : 'N/A'}</p>
               </div>
+              {rlSeries.length > 0 && (
+                <div className="card border-0 shadow-sm mt-3">
+                  <div className="card-header bg-warning text-dark">
+                    <h6 className="mb-0">
+                      <i className="bi bi-graph-up-arrow me-2"></i>
+                      Reinforcement Learning Equity Curve
+                    </h6>
+                  </div>
+                  <div className="card-body">
+                    <div className="row g-2 align-items-end mb-3">
+                      <div className="col-sm-6 col-md-3">
+                        <label className="form-label small mb-1">Select Date</label>
+                        <input
+                          type="date"
+                          className="form-control form-control-sm"
+                          value={rlSelectedDate}
+                          onChange={(e) => setRlSelectedDate(e.target.value)}
+                          min={rlSeries[0].date || rlSeries[0].time?.slice(0, 10)}
+                          max={rlSeries[rlSeries.length - 1].date || rlSeries[rlSeries.length - 1].time?.slice(0, 10)}
+                        />
+                      </div>
+                      <div className="col-sm-6 col-md-3 d-flex gap-2">
+                        <button className="btn btn-outline-info btn-sm" onClick={showRlDateChart}>
+                          Show RL Chart
+                        </button>
+                        <button className="btn btn-outline-secondary btn-sm" onClick={() => setRlChartSeries(rlSeries)}>
+                          Show Full
+                        </button>
+                      </div>
+                    </div>
+                    {rlChartSeries.length > 0 ? (
+                      <RLEquityChart data={rlChartSeries} />
+                    ) : (
+                      <div className="alert alert-warning mb-0">
+                        <i className="bi bi-info-circle me-2"></i>
+                        No data available for the selected date.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

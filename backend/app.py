@@ -37,7 +37,7 @@ from live_trade import (
 )
 from chat import chat_bp
 from utils.backtest_metrics import calculate_all_metrics
-from ai_ml import train_lstm_on_candles, load_model_and_predict
+from ai_ml import train_lstm_on_candles, load_model_and_predict, load_lstm_checkpoint
 from ai_ml import candles_to_dataframe, prepare_training_data
 try:
     from rl_trading import train_rl_agent, evaluate_rl_agent
@@ -48,10 +48,11 @@ except ImportError as e:
     RL_AVAILABLE = False
     # Create dummy functions to prevent errors
     def train_rl_agent(*args, **kwargs):
-        raise RuntimeError("RL module not available. Install TensorFlow.")
+        raise RuntimeError("RL module not available. Install PyTorch.")
     def evaluate_rl_agent(*args, **kwargs):
-        raise RuntimeError("RL module not available. Install TensorFlow.")
+        raise RuntimeError("RL module not available. Install PyTorch.")
 import numpy as np
+import torch
 
 
 def round_to_atm_price(price: float, strike_step: int) -> int:
@@ -4972,7 +4973,7 @@ def api_aiml_evaluate():
         df = candles_to_dataframe(all_candles)
         scaler, scaled = prepare_training_data(df, lookback)
 
-        # Load model (supports .keras preferred or .h5 fallback)
+        # Ensure model is trained and available
         model_dir = os.path.join(os.path.dirname(__file__), 'models')
         try:
             model_result = load_model_and_predict(
@@ -5012,7 +5013,7 @@ def api_aiml_evaluate():
         y_all = np.array(y_all)
 
         # Load model again for prediction after possible quick-train
-        result_for_load = load_model_and_predict(
+        _ = load_model_and_predict(
             model_dir=model_dir,
             symbol=symbol,
             candles=all_candles[-(lookback+200):],
@@ -5020,24 +5021,11 @@ def api_aiml_evaluate():
             lookback=lookback,
             steps_ahead=1,
         )
-        # We only need the model object; reuse the internal loader by calling it directly is not exposed.
-        # So we re-open via keras here for batch predict
-        from tensorflow.keras.models import load_model as keras_load_model
-        model_path_keras = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.keras")
-        model_path_h5 = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.h5")
-        if os.path.exists(model_path_keras):
-            model = keras_load_model(model_path_keras)
-        elif os.path.exists(model_path_h5):
-            try:
-                model = keras_load_model(model_path_h5, compile=False)
-                model.compile(optimizer="adam", loss="mse")
-            except Exception:
-                model = keras_load_model(model_path_h5)
-        else:
-            return jsonify({'status': 'error', 'message': 'Model not found after training'}), 500
-
-        # Predict across full series (single-step horizon per window)
-        y_pred_scaled = model.predict(X_all, verbose=0).reshape(-1)
+        model, _ = load_lstm_checkpoint(model_dir, symbol, horizon)
+        device = next(model.parameters()).device
+        with torch.no_grad():
+            tensor_all = torch.from_numpy(X_all).float().to(device)
+            y_pred_scaled = model(tensor_all).cpu().numpy().reshape(-1)
 
         # Inverse-transform to prices
         last_row_template = np.zeros((feature_dim,))
@@ -5067,6 +5055,13 @@ def api_aiml_evaluate():
 # Backward-compatible aliases without /api prefix
 @app.route('/aiml/train', methods=['POST'])
 def api_aiml_train_compat():
+    return api_aiml_train()
+
+
+@app.route('/api/ai/lstm/train', methods=['POST', 'OPTIONS'])
+def api_ai_lstm_train():
+    if request.method == 'OPTIONS':
+        return ('', 204)
     return api_aiml_train()
 
 
@@ -5166,20 +5161,8 @@ def api_aiml_evaluate_date():
                 batch_size=128,
             )
 
-        # Load model for prediction
-        from tensorflow.keras.models import load_model as keras_load_model
-        model_path_keras = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.keras")
-        model_path_h5 = os.path.join(model_dir, f"{symbol}_lstm_h{horizon}.h5")
-        if os.path.exists(model_path_keras):
-            model = keras_load_model(model_path_keras)
-        elif os.path.exists(model_path_h5):
-            try:
-                model = keras_load_model(model_path_h5, compile=False)
-                model.compile(optimizer="adam", loss="mse")
-            except Exception:
-                model = keras_load_model(model_path_h5)
-        else:
-            return jsonify({'status': 'error', 'message': 'Model not found'}), 500
+        model, _ = load_lstm_checkpoint(model_dir, symbol, horizon)
+        device = next(model.parameters()).device
 
         # Filter to target date only
         df_target = df[df.index.date == target_date].copy()
@@ -5199,7 +5182,9 @@ def api_aiml_evaluate_date():
                 continue
             X_seq = scaled[i-lookback:i, :].reshape(1, lookback, feature_dim)
             y_actual_scaled = scaled[i + horizon - 1, 0]
-            y_pred_scaled = float(model.predict(X_seq, verbose=0)[0][0])
+            with torch.no_grad():
+                tensor_seq = torch.from_numpy(X_seq).float().to(device)
+                y_pred_scaled = float(model(tensor_seq).cpu().numpy()[0][0])
             
             # Inverse transform
             row_a = np.zeros((feature_dim,)); row_a[0] = y_actual_scaled
@@ -5626,6 +5611,7 @@ def api_rl_train():
         day_index = 0
         
         logging.info(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}")
+        print(f"[RL] Training request: symbol={symbol}, years={years}, episodes={episodes}", flush=True)
         
         while current_date <= end_date:
             start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
@@ -5706,7 +5692,25 @@ def api_rl_evaluate():
             symbol=symbol,
             model_dir=model_dir,
         )
-        return jsonify({'status': 'ok', 'symbol': symbol, **result})
+        payload = {
+            'status': 'ok',
+            'symbol': symbol,
+            'period': f'{years:.1f}y',
+            'pnl': result.get('total_pnl'),
+            'wins': result.get('winning_trades'),
+            'losses': result.get('losing_trades'),
+            'win_rate': result.get('win_rate'),
+            'avg_win': result.get('avg_win'),
+            'avg_loss': result.get('avg_loss'),
+            'trade_history': result.get('trade_history'),
+            'actions_taken': result.get('actions_taken'),
+            'final_balance': result.get('final_balance'),
+            'total_trades': result.get('total_trades'),
+            'series': result.get('series', []),
+            'split_index': result.get('split_index', 0),
+            'initial_balance': result.get('initial_balance'),
+        }
+        return jsonify(payload)
     except Exception as e:
         logging.error(f"Error in api_rl_evaluate: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
