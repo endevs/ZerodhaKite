@@ -79,8 +79,224 @@ interface RuleConfig {
 
 interface MountainSignalChartProps {
   strategy: Strategy;
-  activeTab?: 'chart' | 'backtest';
+  activeTab?: 'chart' | 'backtest' | 'optimizer';
 }
+
+interface TimeframeStat {
+  label: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  pnl: number;
+  avgPnl: number;
+}
+
+interface OptimizerSummary {
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  totalPnl: number;
+  averagePnl: number;
+  maxDrawdown: number;
+  maxDrawdownPercent: number;
+  roiPercent: number;
+  openTrades: number;
+  bestDay: TimeframeStat | null;
+  worstDay: TimeframeStat | null;
+  parameters: {
+    stopLossPercent: number;
+    targetPercent: number;
+    lotSize: number;
+    strikeStep: number;
+    initialInvestment: number;
+  };
+  dateRange?: {
+    from: string;
+    to: string;
+    days: number;
+  };
+}
+
+interface OptimizerResults {
+  summary: OptimizerSummary;
+  optionSummary: OptimizerSummary;
+  timeframes: {
+    daily: TimeframeStat[];
+    weekly: TimeframeStat[];
+    monthly: TimeframeStat[];
+    yearly: TimeframeStat[];
+  };
+  optionTimeframes: {
+    daily: TimeframeStat[];
+    weekly: TimeframeStat[];
+    monthly: TimeframeStat[];
+    yearly: TimeframeStat[];
+  };
+}
+
+interface TimeframeTreeNode {
+  id: string;
+  label: string;
+  stats: TimeframeStat | null;
+  children: TimeframeTreeNode[];
+  type: 'year' | 'month' | 'weekGroup' | 'week' | 'day';
+  order?: number;
+}
+
+const monthNamesFull = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+const buildTimeframeTree = (
+  timeframes: {
+    daily: TimeframeStat[];
+    weekly: TimeframeStat[];
+    monthly: TimeframeStat[];
+    yearly: TimeframeStat[];
+  } | undefined,
+  prefix: string
+): TimeframeTreeNode[] => {
+  if (!timeframes) {
+    return [];
+  }
+
+  const tree: TimeframeTreeNode[] = [];
+  const yearMap = new Map<string, TimeframeTreeNode>();
+  const monthMap = new Map<string, TimeframeTreeNode>();
+  const weekGroupMap = new Map<string, TimeframeTreeNode>();
+
+  const getYearNode = (year: string): TimeframeTreeNode => {
+    let node = yearMap.get(year);
+    if (!node) {
+      node = {
+        id: `${prefix}-year-${year}`,
+        label: year,
+        stats: null,
+        children: [],
+        type: 'year',
+        order: Number(year),
+      };
+      yearMap.set(year, node);
+      tree.push(node);
+    }
+    return node;
+  };
+
+  const getMonthNode = (year: string, month: string): TimeframeTreeNode => {
+    const monthKey = `${year}-${month}`;
+    let node = monthMap.get(monthKey);
+    if (!node) {
+      const monthIndex = parseInt(month, 10) - 1;
+      const monthName = monthNamesFull[monthIndex] ?? `Month ${month}`;
+      node = {
+        id: `${prefix}-month-${monthKey}`,
+        label: `${monthName} ${year}`,
+        stats: null,
+        children: [],
+        type: 'month',
+        order: monthIndex,
+      };
+      monthMap.set(monthKey, node);
+      const yearNode = getYearNode(year);
+      yearNode.children.push(node);
+    }
+    return node;
+  };
+
+  (timeframes.yearly ?? []).forEach((stat) => {
+    const yearNode = getYearNode(stat.label);
+    yearNode.stats = stat;
+  });
+
+  (timeframes.monthly ?? []).forEach((stat) => {
+    const [year, month] = stat.label.split('-');
+    if (!year || !month) {
+      return;
+    }
+    const monthNode = getMonthNode(year, month);
+    monthNode.stats = stat;
+  });
+
+  (timeframes.daily ?? []).forEach((stat) => {
+    const parts = stat.label.split('-');
+    if (parts.length < 3) {
+      return;
+    }
+    const [year, month, day] = parts;
+    const monthNode = getMonthNode(year, month);
+    const dateObj = new Date(stat.label);
+    const dayLabel = Number.isNaN(dateObj.getTime())
+      ? stat.label
+      : dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    monthNode.children.push({
+      id: `${prefix}-day-${stat.label}`,
+      label: dayLabel,
+      stats: stat,
+      children: [],
+      type: 'day',
+      order: parseInt(day, 10),
+    });
+  });
+
+  (timeframes.weekly ?? []).forEach((stat) => {
+    const parts = stat.label.split('-');
+    if (parts.length < 2) {
+      return;
+    }
+    const year = parts[0];
+    const weekPart = parts[1];
+    const yearNode = getYearNode(year);
+    let weekGroup = weekGroupMap.get(year);
+    if (!weekGroup) {
+      weekGroup = {
+        id: `${prefix}-weeks-${year}`,
+        label: 'Weekly Breakdown',
+        stats: null,
+        children: [],
+        type: 'weekGroup',
+        order: 100,
+      };
+      weekGroupMap.set(year, weekGroup);
+      yearNode.children.push(weekGroup);
+    }
+    const weekNumber = parseInt(weekPart.replace('W', ''), 10);
+    weekGroup.children.push({
+      id: `${prefix}-week-${stat.label}`,
+      label: `Week ${weekPart.replace('W', '')}`,
+      stats: stat,
+      children: [],
+      type: 'week',
+      order: Number.isNaN(weekNumber) ? undefined : weekNumber,
+    });
+  });
+
+  tree.forEach((yearNode) => {
+    yearNode.children.forEach((child) => {
+      if (child.children && child.children.length > 0) {
+        child.children.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      }
+    });
+
+    yearNode.children.sort((a, b) => {
+      const typePriority: Record<string, number> = {
+        month: 0,
+        weekGroup: 1,
+        week: 0,
+        day: 0,
+        year: 0,
+      };
+      const priorityDiff = (typePriority[a.type] ?? 0) - (typePriority[b.type] ?? 0);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      return (a.order ?? 0) - (b.order ?? 0);
+    });
+  });
+
+  tree.sort((a, b) => (b.order ?? 0) - (a.order ?? 0));
+
+  return tree;
+};
 
 const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, activeTab = 'chart' }) => {
   const [selectedDate, setSelectedDate] = useState<string>('');
@@ -95,6 +311,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [chartType, setChartType] = useState<'candlestick' | 'line'>('line');
   const [ignoredSignals, setIgnoredSignals] = useState<IgnoredSignal[]>([]);
   const [waitingSignals, setWaitingSignals] = useState<WaitingSignal[]>([]);
+  const [optimizerFromDate, setOptimizerFromDate] = useState<string>('');
+  const [optimizerToDate, setOptimizerToDate] = useState<string>('');
+  const [optimizerStopLossPercent, setOptimizerStopLossPercent] = useState<number>(17);
+  const [optimizerTargetPercent, setOptimizerTargetPercent] = useState<number>(45);
+  const [optimizerInitialInvestment, setOptimizerInitialInvestment] = useState<number>(100000);
+  const [optimizerLoading, setOptimizerLoading] = useState<boolean>(false);
+  const [optimizerError, setOptimizerError] = useState<string | null>(null);
+  const [optimizerResults, setOptimizerResults] = useState<OptimizerResults | null>(null);
   const [tradeHistory, setTradeHistory] = useState<Array<{
     signalIndex: number;
     signalTime: string;
@@ -153,6 +377,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     exitPriority: [],
     evaluationSecondsBeforeClose: 20,
   });
+  const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const loadRuleConfig = async () => {
@@ -190,6 +415,32 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
     loadRuleConfig();
   }, []);
+  
+  useEffect(() => {
+    const defaultStopLossPercent = Math.abs(ruleConfig.optionTrade.stopLossPercent) * 100;
+    const defaultTargetPercent = Math.abs(ruleConfig.optionTrade.targetPercent) * 100;
+
+    if (!optimizerResults) {
+      setOptimizerStopLossPercent(Number(defaultStopLossPercent.toFixed(2)));
+      setOptimizerTargetPercent(Number(defaultTargetPercent.toFixed(2)));
+    }
+  }, [ruleConfig.optionTrade.stopLossPercent, ruleConfig.optionTrade.targetPercent, optimizerResults]);
+  
+  useEffect(() => {
+    if (!optimizerResults) {
+      setExpandedTreeNodes(new Set());
+      return;
+    }
+
+    const expanded = new Set<string>();
+    (optimizerResults.timeframes?.yearly ?? []).forEach((stat) => {
+      expanded.add(`index-year-${stat.label}`);
+    });
+    (optimizerResults.optionTimeframes?.yearly ?? []).forEach((stat) => {
+      expanded.add(`option-year-${stat.label}`);
+    });
+    setExpandedTreeNodes(expanded);
+  }, [optimizerResults]);
   
   // Backtest state
   const [backtestFromDate, setBacktestFromDate] = useState<string>('');
@@ -306,6 +557,94 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const formatNumericValue = (value: number): string => {
     const decimals = Number.isInteger(value) ? 0 : 2;
     return value.toFixed(decimals).replace(/\.00$/, '');
+  };
+
+  const MAX_OPTIMIZER_DAYS = 365 * 3;
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+  const validateOptimizerInputs = (): string | null => {
+    if (!optimizerFromDate || !optimizerToDate) {
+      return 'Please select both from and to dates';
+    }
+
+    const fromDate = new Date(optimizerFromDate);
+    const toDate = new Date(optimizerToDate);
+
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return 'Invalid date selection';
+    }
+
+    if (fromDate > toDate) {
+      return 'From date must be before or equal to To date';
+    }
+
+    const diffDays = Math.floor((toDate.getTime() - fromDate.getTime()) / MS_PER_DAY) + 1;
+    if (diffDays > MAX_OPTIMIZER_DAYS) {
+      return 'Maximum 3 years allowed. Please adjust the date range';
+    }
+
+    if (optimizerStopLossPercent <= 0) {
+      return 'Stop loss percent must be greater than 0';
+    }
+
+    if (optimizerTargetPercent <= 0) {
+      return 'Target percent must be greater than 0';
+    }
+
+    if (optimizerInitialInvestment <= 0) {
+      return 'Initial investment must be greater than 0';
+    }
+
+    return null;
+  };
+
+  const runOptimizer = async () => {
+    const validationError = validateOptimizerInputs();
+    if (validationError) {
+      setOptimizerError(validationError);
+      return;
+    }
+
+    setOptimizerLoading(true);
+    setOptimizerError(null);
+
+    try {
+      const response = await fetch('http://localhost:8000/api/optimizer_mountain_signal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          strategy_id: strategy.id,
+          from_date: optimizerFromDate,
+          to_date: optimizerToDate,
+          instrument: strategy.instrument,
+          candle_time: strategy.candle_time,
+          ema_period: strategy.ema_period || 5,
+          option_stop_loss_percent: optimizerStopLossPercent,
+          option_target_percent: optimizerTargetPercent,
+          initial_investment: optimizerInitialInvestment,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to optimize strategy');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        const { status, ...payload } = data;
+        setOptimizerResults(payload as OptimizerResults);
+      } else {
+        throw new Error(data.message || 'Optimization failed');
+      }
+    } catch (err) {
+      console.error('Error running optimizer:', err);
+      setOptimizerError(err instanceof Error ? err.message : 'An error occurred while running optimizer');
+    } finally {
+      setOptimizerLoading(false);
+    }
   };
 
   const getExitBadgeClass = (exitType: string | null | undefined): string => {
@@ -2082,6 +2421,366 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     );
   }
 
+  if (activeTab === 'optimizer') {
+    const todayIso = new Date().toISOString().split('T')[0];
+    const threeYearsAgo = new Date();
+    threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+    const threeYearsAgoIso = threeYearsAgo.toISOString().split('T')[0];
+
+    const summary = optimizerResults?.summary;
+    const optionSummary = optimizerResults?.optionSummary;
+
+    const timeframeOrder: Array<{ key: 'daily' | 'weekly' | 'monthly' | 'yearly'; label: string }> = [
+      { key: 'daily', label: 'Daily' },
+      { key: 'weekly', label: 'Weekly' },
+      { key: 'monthly', label: 'Monthly' },
+      { key: 'yearly', label: 'Yearly' },
+    ];
+
+    const renderSummaryCard = (title: string, cardSummary?: OptimizerSummary, headerClass = 'bg-dark') => {
+      if (!cardSummary) {
+        return null;
+      }
+
+      const safeNumber = (value: number | null | undefined, fallback = 0) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+      const safePercent = (value: number | null | undefined) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+      const totalPnlValue = safeNumber(cardSummary.totalPnl);
+      const averagePnlValue = safeNumber(cardSummary.averagePnl);
+      const drawdownValue = safeNumber(cardSummary.maxDrawdown);
+      const drawdownPercentValue = safePercent(cardSummary.maxDrawdownPercent);
+      const roiValue = safePercent(cardSummary.roiPercent);
+      const initialInvestmentValue = safeNumber(cardSummary.parameters.initialInvestment);
+
+      const totalPnlClass = totalPnlValue >= 0 ? 'text-success' : 'text-danger';
+      const averagePnlClass = averagePnlValue >= 0 ? 'text-success' : 'text-danger';
+      const drawdownClass = drawdownValue >= 0 ? 'text-success' : 'text-danger';
+      const roiClass = roiValue >= 0 ? 'text-success' : 'text-danger';
+
+      return (
+        <div className="card border-0 shadow-sm mb-4">
+          <div className={`card-header ${headerClass} text-white`}>
+            <h6 className="mb-0">
+              <i className="bi bi-graph-up-arrow me-2"></i>
+              {title}
+            </h6>
+          </div>
+          <div className="card-body">
+            <div className="row g-3">
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">Total Trades</div>
+                  <div className="h4 fw-bold mb-0">{cardSummary.totalTrades}</div>
+                  <div className="small text-muted">
+                    {cardSummary.winningTrades}W / {cardSummary.losingTrades}L
+                  </div>
+                </div>
+              </div>
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">Win Rate</div>
+                  <div className="h4 fw-bold mb-0" style={{ color: cardSummary.winRate >= 50 ? '#198754' : '#dc3545' }}>
+                    {cardSummary.winRate.toFixed(2)}%
+                  </div>
+                  <div className="small text-muted">Open Trades: {cardSummary.openTrades}</div>
+                </div>
+              </div>
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">Total P&L</div>
+                  <div className={`h4 fw-bold mb-0 ${totalPnlClass}`}>
+                    {totalPnlValue >= 0 ? '+' : ''}₹{formatNumericValue(totalPnlValue)}
+                  </div>
+                </div>
+              </div>
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">Average P&L</div>
+                  <div className={`h4 fw-bold mb-0 ${averagePnlClass}`}>
+                    {averagePnlValue >= 0 ? '+' : ''}₹{formatNumericValue(averagePnlValue)}
+                  </div>
+                </div>
+              </div>
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">Max Drawdown</div>
+                  <div className={`h4 fw-bold mb-0 ${drawdownClass}`}>
+                    {drawdownValue >= 0 ? '+' : ''}₹{formatNumericValue(drawdownValue)}
+                  </div>
+                  <div className="small text-muted">{drawdownPercentValue.toFixed(2)}%</div>
+                </div>
+              </div>
+              <div className="col-md-3">
+                <div className="text-center p-3 bg-light rounded">
+                  <div className="text-muted small">ROI</div>
+                  <div className={`h4 fw-bold mb-0 ${roiClass}`}>
+                    {roiValue >= 0 ? '+' : ''}{roiValue.toFixed(2)}%
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="row g-3 mt-3">
+              <div className="col-md-6">
+                <div className="p-3 bg-success bg-opacity-10 rounded">
+                  <div className="text-muted small">Best Day</div>
+                  {cardSummary.bestDay ? (
+                    <>
+                      <div className="fw-semibold">{cardSummary.bestDay.label}</div>
+                      <div className="text-success mb-0">
+                        {cardSummary.bestDay.pnl >= 0 ? '+' : ''}₹{formatNumericValue(cardSummary.bestDay.pnl)}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-muted small mb-0">No data available</div>
+                  )}
+                </div>
+              </div>
+              <div className="col-md-6">
+                <div className="p-3 bg-danger bg-opacity-10 rounded">
+                  <div className="text-muted small">Worst Day</div>
+                  {cardSummary.worstDay ? (
+                    <>
+                      <div className="fw-semibold">{cardSummary.worstDay.label}</div>
+                      <div className="text-danger mb-0">
+                        {cardSummary.worstDay.pnl >= 0 ? '+' : ''}₹{formatNumericValue(cardSummary.worstDay.pnl)}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-muted small mb-0">No data available</div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="row mt-3 align-items-center">
+              <div className="col-md-6">
+                <small className="text-muted">
+                  <strong>Parameters:</strong> SL {formatNumericValue(cardSummary.parameters.stopLossPercent)}% | Target {formatNumericValue(cardSummary.parameters.targetPercent)}% | Lot {cardSummary.parameters.lotSize} | Strike Step {cardSummary.parameters.strikeStep} | Initial ₹{formatNumericValue(initialInvestmentValue)}
+                </small>
+              </div>
+              {cardSummary.dateRange && (
+                <div className="col-md-6 text-md-end">
+                  <small className="text-muted">
+                    <strong>Date Range:</strong> {cardSummary.dateRange.from} → {cardSummary.dateRange.to} ({cardSummary.dateRange.days} days)
+                  </small>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const renderTimeframeSection = (
+      title: string,
+      dataset?: {
+        daily: TimeframeStat[];
+        weekly: TimeframeStat[];
+        monthly: TimeframeStat[];
+        yearly: TimeframeStat[];
+      },
+      prefix = 'timeframe'
+    ) => {
+      const nodes = buildTimeframeTree(dataset, prefix);
+
+      return (
+        <div className="card border-0 shadow-sm mb-4">
+          <div className="card-header bg-secondary text-white">
+            <h6 className="mb-0">
+              <i className="bi bi-calendar-range me-2"></i>
+              {title}
+            </h6>
+          </div>
+          <div className="card-body">
+            {nodes.length === 0 ? (
+              <p className="text-muted small mb-0">No timeframe data available.</p>
+            ) : (
+              <ul className="list-unstyled mb-0">
+                {nodes.map((node) => renderTreeNode(node, expandedTreeNodes, setExpandedTreeNodes, formatNumericValue))}
+              </ul>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    return (
+      <div className="mountain-signal-chart">
+        <div className="card border-0 shadow-sm mb-3">
+          <div className="card-body">
+            <h5 className="card-title mb-3">
+              <i className="bi bi-sliders me-2"></i>
+              Strategy Optimizer - {strategy.strategy_name}
+            </h5>
+            <p className="text-muted small mb-4">
+              Experiment with option stop-loss and target percentages across a broad historical window (up to 3 years) to evaluate profitability and win rates.
+            </p>
+
+            <div className="row g-3 mb-3">
+              <div className="col-md-3">
+                <label htmlFor="optimizer-from-date" className="form-label fw-bold">
+                  <i className="bi bi-calendar3 me-2"></i>From Date
+                </label>
+                <input
+                  type="date"
+                  id="optimizer-from-date"
+                  className="form-control"
+                  value={optimizerFromDate}
+                  onChange={(e) => setOptimizerFromDate(e.target.value)}
+                  min={threeYearsAgoIso}
+                  max={todayIso}
+                />
+              </div>
+              <div className="col-md-3">
+                <label htmlFor="optimizer-to-date" className="form-label fw-bold">
+                  <i className="bi bi-calendar3 me-2"></i>To Date
+                </label>
+                <input
+                  type="date"
+                  id="optimizer-to-date"
+                  className="form-control"
+                  value={optimizerToDate}
+                  onChange={(e) => setOptimizerToDate(e.target.value)}
+                  min={threeYearsAgoIso}
+                  max={todayIso}
+                />
+              </div>
+              <div className="col-md-3">
+                <label htmlFor="optimizer-stop-loss" className="form-label fw-bold">
+                  <i className="bi bi-shield-exclamation me-2"></i>Option Stop Loss (%)
+                </label>
+                <input
+                  type="number"
+                  id="optimizer-stop-loss"
+                  className="form-control"
+                  value={optimizerStopLossPercent}
+                  min={0.1}
+                  step={0.1}
+                  onChange={(e) => {
+                    const value = parseFloat(e.target.value);
+                    setOptimizerStopLossPercent(Number.isNaN(value) ? 0 : value);
+                  }}
+                />
+              </div>
+              <div className="col-md-3">
+                <label htmlFor="optimizer-target" className="form-label fw-bold">
+                  <i className="bi bi-bullseye me-2"></i>Option Target (%)
+                </label>
+                <input
+                  type="number"
+                  id="optimizer-target"
+                  className="form-control"
+                  value={optimizerTargetPercent}
+                  min={0.1}
+                  step={0.1}
+                  onChange={(e) => {
+                    const value = parseFloat(e.target.value);
+                    setOptimizerTargetPercent(Number.isNaN(value) ? 0 : value);
+                  }}
+                />
+              </div>
+              <div className="col-md-3">
+                <label htmlFor="optimizer-investment" className="form-label fw-bold">
+                  <i className="bi bi-cash-coin me-2"></i>Initial Investment (₹)
+                </label>
+                <input
+                  type="number"
+                  id="optimizer-investment"
+                  className="form-control"
+                  value={optimizerInitialInvestment}
+                  min={1000}
+                  step={1000}
+                  onChange={(e) => {
+                    const value = parseFloat(e.target.value);
+                    setOptimizerInitialInvestment(Number.isNaN(value) ? 0 : value);
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="row g-3 align-items-end mb-3">
+              <div className="col-md-6">
+                <div className="alert alert-secondary py-2 mb-0">
+                  <i className="bi bi-info-circle me-2"></i>
+                  Use positive percentages for stop loss and target. The optimizer will apply these values to every qualifying option trade within the selected window.
+                </div>
+              </div>
+              <div className="col-md-3">
+                <label className="form-label fw-bold">&nbsp;</label>
+                <button
+                  className="btn btn-outline-secondary w-100"
+                  type="button"
+                  onClick={() => {
+                    const defaultStopLossPercent = Math.abs(ruleConfig.optionTrade.stopLossPercent) * 100;
+                    const defaultTargetPercent = Math.abs(ruleConfig.optionTrade.targetPercent) * 100;
+                    setOptimizerStopLossPercent(Number(defaultStopLossPercent.toFixed(2)));
+                    setOptimizerTargetPercent(Number(defaultTargetPercent.toFixed(2)));
+                    setOptimizerInitialInvestment(100000);
+                  }}
+                  disabled={optimizerLoading}
+                >
+                  <i className="bi bi-arrow-counterclockwise me-2"></i>Reset Parameters
+                </button>
+              </div>
+              <div className="col-md-3">
+                <label className="form-label fw-bold">&nbsp;</label>
+                <button
+                  className="btn btn-primary w-100"
+                  onClick={runOptimizer}
+                  disabled={optimizerLoading || !optimizerFromDate || !optimizerToDate}
+                >
+                  {optimizerLoading ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <i className="bi bi-play-circle me-2"></i>Run Optimizer
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {optimizerError && (
+              <div className="alert alert-danger" role="alert">
+                <i className="bi bi-exclamation-triangle me-2"></i>
+                {optimizerError}
+              </div>
+            )}
+
+            {optimizerResults && (
+              <>
+                {renderSummaryCard('Index Performance Overview', summary, 'bg-dark')}
+                {renderSummaryCard('Option Performance Overview', optionSummary, 'bg-secondary')}
+
+                <div className="row">
+                  <div className="col-lg-6">
+                    {renderTimeframeSection('Index Timeframe Breakdown', optimizerResults.timeframes, 'index')}
+                  </div>
+                  <div className="col-lg-6">
+                    {renderTimeframeSection('Option Timeframe Breakdown', optimizerResults.optionTimeframes, 'option')}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {!optimizerResults && !optimizerLoading && (
+              <div className="alert alert-info border-0 bg-info bg-opacity-10">
+                <i className="bi bi-lightbulb me-2"></i>
+                Select a date range and adjust the stop loss / target percentages, then click <strong>Run Optimizer</strong> to view results.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mountain-signal-chart">
       <div className="card border-0 shadow-sm mb-3">
@@ -3008,6 +3707,83 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         </div>
       )}
     </div>
+  );
+};
+
+const toggleTreeNode = (
+  id: string,
+  expandedTreeNodes: Set<string>,
+  setExpandedTreeNodes: React.Dispatch<React.SetStateAction<Set<string>>>
+) => {
+  setExpandedTreeNodes((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    return next;
+  });
+};
+
+const renderTreeNode = (
+  node: TimeframeTreeNode,
+  expandedTreeNodes: Set<string>,
+  setExpandedTreeNodes: React.Dispatch<React.SetStateAction<Set<string>>>,
+  formatNumericValue: (value: number) => string
+): React.ReactElement => {
+  const hasChildren = node.children && node.children.length > 0;
+  const expanded = expandedTreeNodes.has(node.id);
+  const pnlValue = node.stats?.pnl ?? null;
+  const avgPnlValue = node.stats?.avgPnl ?? null;
+
+  return (
+    <li key={node.id} className="mb-2">
+      <div className="d-flex align-items-start">
+        {hasChildren ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-link text-decoration-none p-0 me-2"
+            onClick={() => toggleTreeNode(node.id, expandedTreeNodes, setExpandedTreeNodes)}
+            aria-expanded={expanded}
+            aria-controls={`${node.id}-children`}
+          >
+            <i className={`bi bi-caret-${expanded ? 'down-fill' : 'right-fill'}`}></i>
+          </button>
+        ) : (
+          <span className="me-2" style={{ width: '1rem' }}></span>
+        )}
+        <div>
+          <div className="fw-semibold">{node.label}</div>
+          {node.stats && (
+            <div className="small text-muted">
+              Trades: {node.stats.trades} · Wins: {node.stats.wins} · Losses: {node.stats.losses} · Win% {node.stats.winRate.toFixed(2)}%
+              {pnlValue !== null && (
+                <>
+                  {' · '}P&L{' '}
+                  <span className={pnlValue >= 0 ? 'text-success' : 'text-danger'}>
+                    {pnlValue >= 0 ? '+' : ''}₹{formatNumericValue(pnlValue)}
+                  </span>
+                </>
+              )}
+              {avgPnlValue !== null && (
+                <>
+                  {' · '}Avg{' '}
+                  <span className={avgPnlValue >= 0 ? 'text-success' : 'text-danger'}>
+                    {avgPnlValue >= 0 ? '+' : ''}₹{formatNumericValue(avgPnlValue)}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      {hasChildren && expanded && (
+        <ul id={`${node.id}-children`} className="list-unstyled ms-4 mt-2">
+          {node.children.map((child) => renderTreeNode(child, expandedTreeNodes, setExpandedTreeNodes, formatNumericValue))}
+        </ul>
+      )}
+    </li>
   );
 };
 

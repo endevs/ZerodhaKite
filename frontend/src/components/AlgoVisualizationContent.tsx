@@ -32,7 +32,7 @@ interface AlgoVisualizationContentProps {
 const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
-  const [activeTab, setActiveTab] = useState<'flow' | 'chart' | 'backtest'>('flow');
+  const [activeTab, setActiveTab] = useState<'flow' | 'chart' | 'backtest' | 'optimizer'>('flow');
   const [loading, setLoading] = useState<boolean>(false);
 
   // Fetch strategies from backend
@@ -145,6 +145,16 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                     Backtest Report
                   </button>
                 </li>
+                <li className="nav-item" role="presentation">
+                  <button
+                    className={`nav-link ${activeTab === 'optimizer' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('optimizer')}
+                    type="button"
+                  >
+                    <i className="bi bi-sliders me-2"></i>
+                    Strategy Optimizer
+                  </button>
+                </li>
               </ul>
 
               {/* Tab Content */}
@@ -224,6 +234,33 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
                             <div className="text-center text-muted">
                               <i className="bi bi-clipboard-data" style={{ fontSize: '4rem', opacity: 0.3 }}></i>
                               <p className="mt-3">Backtest report for {selectedStrategy.strategy_type} will be implemented soon</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Strategy Optimizer Tab */}
+                {activeTab === 'optimizer' && (
+                  <div className="tab-pane fade show active">
+                    {selectedStrategy.strategy_type === 'capture_mountain_signal' ? (
+                      <MountainSignalChart strategy={selectedStrategy} activeTab="optimizer" />
+                    ) : (
+                      <div className="card border-0 bg-light">
+                        <div className="card-body">
+                          <h5 className="card-title mb-3">
+                            <i className="bi bi-sliders me-2 text-primary"></i>
+                            Strategy Optimizer
+                          </h5>
+                          <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
+                            <div className="text-center text-muted">
+                              <i className="bi bi-sliders" style={{ fontSize: '4rem', opacity: 0.3 }}></i>
+                              <p className="mt-3">Strategy optimizer for {selectedStrategy.strategy_type} will be implemented soon</p>
+                              <p className="small">
+                                Strategy: <strong>{selectedStrategy.strategy_name}</strong>
+                              </p>
                             </div>
                           </div>
                         </div>
