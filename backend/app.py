@@ -1015,7 +1015,7 @@ def process_live_trade_deployments() -> None:
     if not live_trade_lock.acquire(blocking=False):
         return
     try:
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         deployments = live_get_deployments_for_processing(now)
         if not deployments:
             return
@@ -5330,7 +5330,7 @@ def api_live_trade_deploy():
         logging.exception("Failed to validate margins for live trade deployment")
         return jsonify({'status': 'error', 'message': f'Unable to validate Zerodha margin: {exc}'}), 500
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     status = STATUS_ACTIVE
     phase = 'initializing'
     message = 'Deployment activated immediately.'
@@ -5385,7 +5385,7 @@ def api_live_trade_pause():
     if deployment.get('status') == STATUS_PAUSED:
         return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(deployment)})
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     state = deployment.get('state') or {}
     state.update({
         'phase': 'paused',
@@ -5416,7 +5416,7 @@ def api_live_trade_resume():
     if deployment.get('status') == STATUS_ACTIVE:
         return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(deployment)})
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     state = deployment.get('state') or {}
     state.update({
         'phase': 'resuming',
@@ -5444,7 +5444,7 @@ def api_live_trade_stop():
     if not deployment:
         return jsonify({'status': 'error', 'message': 'No deployment found to stop.'}), 404
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     state = deployment.get('state') or {}
     state.update({
         'phase': 'stopped',
@@ -5535,7 +5535,7 @@ def api_live_trade_square_off():
                 'message': str(exc)
             })
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     state = deployment.get('state') or {}
     state.update({
         'phase': 'square_off',
