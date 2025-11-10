@@ -120,6 +120,7 @@ def create_deployment(
     status: str,
     kite_access_token: str,
     state: Optional[Dict[str, Any]] = None,
+    started_at: Optional[datetime.datetime] = None,
 ) -> Dict[str, Any]:
     if status not in ALLOWED_STATUSES:
         raise ValueError(f"Unsupported deployment status: {status}")
@@ -134,7 +135,7 @@ def create_deployment(
                 initial_investment, scheduled_start, started_at,
                 last_run_at, state_json, kite_access_token, error_message
             )
-            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
             """,
             (
                 user_id,
@@ -143,6 +144,7 @@ def create_deployment(
                 status,
                 float(initial_investment),
                 scheduled_start.isoformat() if scheduled_start else None,
+                started_at.isoformat() if started_at else None,
                 state_blob,
                 kite_access_token,
             ),
@@ -153,6 +155,25 @@ def create_deployment(
         conn.close()
 
     return get_deployment_by_id(deployment_id)
+
+
+def _serialize_state(state: Optional[Dict[str, Any]]) -> Optional[str]:
+    if state is None:
+        return None
+
+    def convert(obj: Any) -> Any:
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        if isinstance(obj, datetime.date):
+            return obj.isoformat()
+        if isinstance(obj, list):
+            return [convert(item) for item in obj]
+        if isinstance(obj, dict):
+            return {key: convert(value) for key, value in obj.items()}
+        return obj
+
+    cleaned = convert(state)
+    return json.dumps(cleaned)
 
 
 def update_deployment(
@@ -175,7 +196,7 @@ def update_deployment(
 
     if state is not None:
         fields.append("state_json = ?")
-        params.append(json.dumps(state))
+        params.append(_serialize_state(state))
 
     if last_run_at is not None:
         fields.append("last_run_at = ?")

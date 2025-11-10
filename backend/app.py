@@ -40,6 +40,7 @@ from live_trade import (
 # Constants for market instruments
 BANKNIFTY_SPOT_SYMBOL = 'NSE:NIFTY BANK'
 NIFTY_SPOT_SYMBOL = 'NSE:NIFTY 50'
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 from chat import chat_bp
 from utils.backtest_metrics import calculate_all_metrics
 from ai_ml import train_lstm_on_candles, load_model_and_predict, load_lstm_checkpoint
@@ -960,16 +961,21 @@ def preview_option_trade(
     strike_rounding_map = (rules.get('strike_rounding') or {})
     lot_sizes_map = (rules.get('lot_sizes') or {})
     option_trade_config = rules.get('option_trade') or {}
+    evaluation_config = rules.get('evaluation') or {}
 
     strike_step = strike_rounding_map.get(instrument, 100 if 'BANK' in instrument else 50)
     lot_size = lot_sizes_map.get(instrument, 35 if 'BANK' in instrument else 75)
     stop_loss_percent = option_trade_config.get('stop_loss_percent', -0.17)
     target_percent = option_trade_config.get('target_percent', 0.45)
+    evaluation_seconds = evaluation_config.get('seconds_before_close', 20)
+    try:
+        candle_interval_minutes = int(strategy_row['candle_time'])
+    except (KeyError, TypeError, ValueError):
+        candle_interval_minutes = 5
 
     spot_price = get_spot_quote(kite_client, instrument)
     atm_strike = round_to_atm_price(spot_price, strike_step)
-    ist_timezone = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-    today_ist = datetime.datetime.now(datetime.timezone.utc).astimezone(ist_timezone)
+    today_ist = datetime.datetime.now(datetime.timezone.utc).astimezone(IST)
     expiry_date = get_next_monthly_expiry(today_ist.date())
     option_symbol = compose_option_symbol(instrument, expiry_date, atm_strike, option_type)
 
@@ -1002,6 +1008,32 @@ def preview_option_trade(
         'targetPercent': target_percent,
         'stopLossPrice': stop_loss_price,
         'targetPrice': target_price,
+        'evaluationSecondsBeforeClose': evaluation_seconds,
+        'candleIntervalMinutes': candle_interval_minutes,
+    }
+
+
+def place_preview_order(kite_client: KiteConnect, preview: Dict[str, Any], order_type: str) -> Dict[str, Any]:
+    tradingsymbol = preview['optionSymbol']
+    quantity = preview['totalQuantity']
+    if quantity <= 0:
+        raise ValueError("Quantity must be greater than zero")
+
+    params = {
+        'tradingsymbol': tradingsymbol,
+        'exchange': kite_client.EXCHANGE_NFO,
+        'transaction_type': kite_client.TRANSACTION_TYPE_BUY if order_type == 'ENTRY' else kite_client.TRANSACTION_TYPE_SELL,
+        'quantity': int(quantity),
+        'product': kite_client.PRODUCT_MIS,
+        'order_type': kite_client.ORDER_TYPE_MARKET,
+        'validity': kite_client.VALIDITY_DAY,
+        'variety': kite_client.VARIETY_REGULAR,
+    }
+
+    order_id = kite_client.place_order(**params)
+    return {
+        'order_id': order_id,
+        'params': params,
     }
 
 
@@ -1129,7 +1161,17 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
         if isinstance(margins, dict):
             equity = margins.get('equity') or {}
             available = equity.get('available') or {}
-            available_cash = available.get('cash') or available.get('intraday') or available.get('adhoc_margin')
+            live_balance = available.get('live_balance')
+            mat_intraday = available.get('intraday')
+            mat_cash = available.get('cash')
+            available_cash = live_balance
+            if available_cash is None:
+                if mat_cash is not None and mat_intraday is not None:
+                    available_cash = float(mat_cash) + float(mat_intraday)
+                elif mat_cash is not None:
+                    available_cash = float(mat_cash)
+                elif mat_intraday is not None:
+                    available_cash = float(mat_intraday)
     except Exception:
         available_cash = None
 
@@ -1142,6 +1184,19 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
         except (TypeError, ValueError):
             continue
 
+    evaluation_seconds = state.get('config', {}).get('evaluationSecondsBeforeClose', 20)
+    candle_interval = state.get('config', {}).get('candleIntervalMinutes', 5)
+    ist_now = now.astimezone(IST)
+    remainder_minutes = ist_now.minute % candle_interval
+    close_minute_delta = (candle_interval - remainder_minutes) % candle_interval
+    candle_close_time_ist = (
+        ist_now.replace(second=0, microsecond=0) +
+        datetime.timedelta(minutes=close_minute_delta, seconds=-ist_now.second)
+    )
+    if close_minute_delta == 0 and ist_now.second >= (60 - evaluation_seconds):
+        candle_close_time_ist = ist_now.replace(second=0, microsecond=0)
+    evaluation_target_ist = candle_close_time_ist - datetime.timedelta(seconds=evaluation_seconds)
+
     state.update({
         'phase': phase,
         'message': message,
@@ -1153,7 +1208,17 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             'snapshot': margins if isinstance(margins, dict) else None,
         },
         'livePnl': total_pnl,
+        'openOrdersCount': len(sanitized_orders),
+        'openPositionsCount': len(open_positions),
+        'lastEvaluationTarget': evaluation_target_ist.isoformat(),
     })
+
+    history_entry = (
+        f"Scheduler run at {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST "
+        f"(evaluation target {evaluation_target_ist.strftime('%Y-%m-%d %H:%M:%S')} IST) — "
+        f"phase={phase}, open_orders={len(sanitized_orders)}, open_positions={len(open_positions)}, pnl={total_pnl:.2f}"
+    )
+    live_append_state_message(deployment_id, message=history_entry, level='debug')
 
     live_update_deployment(
         deployment_id,
@@ -1239,7 +1304,7 @@ def add_cors_headers(response):
             response.headers['Access-Control-Allow-Origin'] = allowed_origins[0]
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE'
     except Exception as cors_err:
         logging.debug(f"CORS header injection failed: {cors_err}")
     return response
@@ -5443,6 +5508,64 @@ def api_live_trade_preview():
     })
 
 
+@app.route("/api/live_trade/preview_order", methods=['POST'])
+def api_live_trade_preview_order():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if 'access_token' not in session:
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    data = request.get_json() or {}
+    strategy_id_raw = data.get('strategy_id')
+    lot_count_raw = data.get('lot_count', 1)
+    order_type = (data.get('order_type') or 'ENTRY').upper()
+
+    if order_type not in {'ENTRY', 'EXIT'}:
+        return jsonify({'status': 'error', 'message': 'order_type must be ENTRY or EXIT'}), 400
+
+    try:
+        lot_count = int(lot_count_raw)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid lot count.'}), 400
+    if lot_count <= 0:
+        return jsonify({'status': 'error', 'message': 'Lot count must be greater than zero.'}), 400
+
+    if strategy_id_raw is None:
+        return jsonify({'status': 'error', 'message': 'Strategy identifier required.'}), 400
+    try:
+        strategy_id = int(strategy_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
+
+    strategy_row = _get_strategy_record(strategy_id, session['user_id'])
+    if not strategy_row:
+        return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+
+    user_row = _get_user_record(session['user_id'])
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found.'}), 400
+
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+
+    try:
+        kite_client = KiteConnect(api_key=api_key)
+        kite_client.set_access_token(session['access_token'])
+        preview = preview_option_trade(kite_client, strategy_row, lot_count)
+        order_result = place_preview_order(kite_client, preview, order_type)
+    except Exception as exc:
+        logging.exception("Preview order failed")
+        return jsonify({'status': 'error', 'message': f'Order failed: {exc}'}), 500
+
+    return jsonify({
+        'status': 'success',
+        'order': order_result,
+        'preview': preview,
+    })
+
+
 @app.route("/api/live_trade/deploy", methods=['POST'])
 def api_live_trade_deploy():
     if 'user_id' not in session:
@@ -5510,18 +5633,29 @@ def api_live_trade_deploy():
         preview = preview_option_trade(kite_client, strategy_row, lot_count)
         margins = kite_client.margins()
         available_cash = None
+        available_intraday = None
+        total_available = None
         if isinstance(margins, dict):
             equity = margins.get('equity') or {}
             available_dict = equity.get('available') or {}
-            available_cash = (
-                available_dict.get('cash')
-                or available_dict.get('intraday')
-                or available_dict.get('adhoc_margin')
-            )
-        if available_cash is not None and preview['requiredCapital'] > float(available_cash):
+            live_balance = available_dict.get('live_balance')
+            available_cash = available_dict.get('cash')
+            available_intraday = available_dict.get('intraday')
+
+            if live_balance is not None:
+                total_available = float(live_balance)
+            else:
+                total_available = 0.0
+                if available_cash is not None:
+                    total_available += float(available_cash)
+                if available_intraday is not None:
+                    total_available += float(available_intraday)
+        available_float = float(total_available or 0.0)
+        if available_float <= 0 or preview['requiredCapital'] > available_float:
             return jsonify({
                 'status': 'error',
-                'message': f'Insufficient margin. Required ₹{preview["requiredCapital"]:.2f}, Available ₹{float(available_cash):.2f}'
+                'message': f'Insufficient margin. Required ₹{preview["requiredCapital"]:.2f}, Available ₹{available_float:.2f}',
+                'margins': margins,
             }), 400
     except Exception as exc:
         logging.exception("Failed to validate margins for live trade deployment")
@@ -5543,7 +5677,9 @@ def api_live_trade_deploy():
         'orders': [],
         'positions': [],
         'margin': {
+            'availableCash': available_float,
             'requiredCapital': preview['requiredCapital'],
+            'snapshot': margins if isinstance(margins, dict) else None,
         },
         'livePnl': 0.0,
         'history': [
@@ -5560,6 +5696,8 @@ def api_live_trade_deploy():
             'optionSymbol': preview['optionSymbol'],
             'stopLossPercent': preview['stopLossPercent'],
             'targetPercent': preview['targetPercent'],
+            'evaluationSecondsBeforeClose': preview.get('evaluationSecondsBeforeClose', 20),
+            'candleIntervalMinutes': preview.get('candleIntervalMinutes', 5),
         }
     }
 
@@ -5571,7 +5709,8 @@ def api_live_trade_deploy():
         scheduled_start=scheduled_start_dt,
         status=status,
         kite_access_token=access_token,
-        state=state
+        state=state,
+        started_at=None if status != STATUS_ACTIVE else now,
     )
 
     return jsonify({
@@ -5636,6 +5775,7 @@ def api_live_trade_resume():
         status=STATUS_ACTIVE,
         state=state,
         last_run_at=now,
+        started_at=deployment.get('started_at') or now,
         error_message=None
     )
 
@@ -5765,8 +5905,10 @@ def api_live_trade_square_off():
     })
 
 
-@app.route("/api/live_trade/delete", methods=['DELETE'])
+@app.route("/api/live_trade/delete", methods=['DELETE', 'OPTIONS'])
 def api_live_trade_delete():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'success'}), 200
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 

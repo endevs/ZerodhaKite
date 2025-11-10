@@ -97,7 +97,12 @@ interface LiveDeploymentState {
     optionSymbol?: string;
     stopLossPercent?: number;
     targetPercent?: number;
+    evaluationSecondsBeforeClose?: number;
+    candleIntervalMinutes?: number;
   };
+  openOrdersCount?: number;
+  openPositionsCount?: number;
+  lastEvaluationTarget?: string;
 }
 
 interface LiveDeployment {
@@ -128,6 +133,7 @@ const LiveTradeContent: React.FC = () => {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<LiveTradePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [testOrderLoading, setTestOrderLoading] = useState<boolean>(false);
 
   const formatCurrency = useCallback((value?: number | null, fallback = '—') => {
     if (value === undefined || value === null || Number.isNaN(value)) {
@@ -301,6 +307,43 @@ const LiveTradeContent: React.FC = () => {
     }
   };
 
+  const handleTestOrder = async () => {
+    if (!selectedStrategy) {
+      setError('Select a strategy before placing a test order.');
+      return;
+    }
+    if (!preview) {
+      setError('Generate a trade preview before placing a test order.');
+      return;
+    }
+
+    setTestOrderLoading(true);
+    setError(null);
+    setActionMessage(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/live_trade/preview_order', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          strategy_id: selectedStrategy,
+          lot_count: lotCount,
+          order_type: 'ENTRY',
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || data.status !== 'success') {
+        throw new Error(data.message || 'Test order failed.');
+      }
+      setActionMessage(`Test order placed successfully (Order ID: ${data.order.order_id}).`);
+    } catch (err) {
+      console.error('Test order error:', err);
+      setError(err instanceof Error ? err.message : 'Test order failed.');
+    } finally {
+      setTestOrderLoading(false);
+    }
+  };
+
   const handleSimpleAction = async (endpoint: string, successMessage: string) => {
     setError(null);
     setActionMessage(null);
@@ -357,14 +400,30 @@ const LiveTradeContent: React.FC = () => {
 
   const currentPhase = deployment?.state?.phase || 'idle';
   const history = deployment?.state?.history ?? [];
-  const orders = deployment?.state?.orders ?? [];
-  const positions = deployment?.state?.positions ?? [];
-  const squareOffResults = deployment?.state?.squareOff ?? [];
+  const orders: LiveOrder[] = Array.isArray(deployment?.state?.orders)
+    ? (deployment?.state?.orders as LiveOrder[])
+    : [];
+  const rawPositions = deployment?.state?.positions;
+  const positions: LivePosition[] = Array.isArray(rawPositions)
+    ? (rawPositions as LivePosition[])
+    : [];
+  const openPositionsCount = positions.length || deployment?.state?.openPositionsCount || 0;
+  const squareOffResults = Array.isArray(deployment?.state?.squareOff)
+    ? (deployment?.state?.squareOff as SquareOffResult[])
+    : [];
   const availableCash = deployment?.state?.margin?.availableCash;
   const requiredCapital = preview?.requiredCapital ?? deployment?.state?.margin?.requiredCapital;
   const config = deployment?.state?.config ?? {};
-  const stopLossDisplay = preview ? preview.stopLossPercentDisplay : config.stopLossPercent ? Math.abs(config.stopLossPercent) * 100 : null;
-  const targetDisplay = preview ? preview.targetPercentDisplay : config.targetPercent ? Math.abs(config.targetPercent) * 100 : null;
+  const stopLossDisplay = preview
+    ? preview.stopLossPercentDisplay
+    : config.stopLossPercent
+      ? Math.abs(config.stopLossPercent) * 100
+      : null;
+  const targetDisplay = preview
+    ? preview.targetPercentDisplay
+    : config.targetPercent
+      ? Math.abs(config.targetPercent) * 100
+      : null;
 
   return (
     <div className="container-fluid py-3">
@@ -460,6 +519,29 @@ const LiveTradeContent: React.FC = () => {
                     Select a strategy to view strike, lot size, and capital requirements.
                   </div>
                 )}
+              </div>
+
+              <div className="mb-3">
+                <button
+                  className="btn btn-outline-primary w-100"
+                  disabled={testOrderLoading || !preview}
+                  onClick={handleTestOrder}
+                >
+                  {testOrderLoading ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-2" role="status" />
+                      Placing Test Order...
+                    </>
+                  ) : (
+                    <>
+                      <i className="bi bi-lightning-charge me-2"></i>
+                      Place Test Order
+                    </>
+                  )}
+                </button>
+                <div className="form-text">
+                  Sends a market MIS order using the previewed lot size and option symbol.
+                </div>
               </div>
 
               <div className="mb-3">
@@ -604,14 +686,22 @@ const LiveTradeContent: React.FC = () => {
                             ? `${config.lotCount} × ${config.lotSize} = ${config.totalQuantity ?? config.lotCount * config.lotSize}`
                             : '—'}
                         </p>
-                        <p className="mb-1">
-                          <strong>Scheduled Start:</strong>{' '}
-                          {formatDateTime(deployment.scheduledStart)}
-                        </p>
-                        <p className="mb-0">
-                          <strong>Started:</strong>{' '}
-                          {formatDateTime(deployment.startedAt)}
-                        </p>
+                      <p className="mb-1">
+                        <strong>Scheduled Start:</strong>{' '}
+                        {deployment.scheduledStart
+                          ? formatDateTime(deployment.scheduledStart)
+                          : '—'}
+                      </p>
+                      <p className="mb-0">
+                        <strong>Started:</strong>{' '}
+                        {deployment.startedAt
+                          ? formatDateTime(deployment.startedAt)
+                          : deployment.status === 'SCHEDULED'
+                            ? 'Pending start'
+                            : deployment.status === 'ACTIVE'
+                              ? 'Starting...'
+                              : '—'}
+                      </p>
                       </div>
                     </div>
                     <div className="col-md-6">
@@ -709,9 +799,9 @@ const LiveTradeContent: React.FC = () => {
                   <div className="mb-4">
                     <h6 className="fw-semibold d-flex align-items-center">
                       <i className="bi bi-diagram-3 me-2"></i>
-                      Positions ({positions.length})
+                      Positions ({openPositionsCount})
                     </h6>
-                    {positions.length === 0 ? (
+                    {openPositionsCount === 0 ? (
                       <p className="text-muted mb-0">No open positions.</p>
                     ) : (
                       <div className="table-responsive">
